@@ -1,0 +1,194 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── DARK MODE (default) ── */
+:root {
+  --bg:      #080b12;
+  --bg2:     #0d1117;
+  --bg3:     #161b22;
+  --bg4:     #21262d;
+  --border:  rgba(255,255,255,0.07);
+  --border2: rgba(255,255,255,0.12);
+  --text:    #e6edf3;
+  --text2:   #d0d7de;
+  --muted:   #8b949e;
+  --dim:     #6b7280;
+  --faint:   #374151;
+  --green:   #00C853;
+  --green2:  #00a844;
+  --blue:    #58a6ff;
+  --amber:   #f0a500;
+  --red:     #f85149;
+  --purple:  #8957e5;
+  --card-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  --input-bg: #0d1117;
+}
+
+/* ── LIGHT MODE ── */
+[data-theme="light"] {
+  --bg:      #f8fafc;
+  --bg2:     #ffffff;
+  --bg3:     #f1f5f9;
+  --bg4:     #e2e8f0;
+  --border:  rgba(0,0,0,0.08);
+  --border2: rgba(0,0,0,0.15);
+  --text:    #0f172a;
+  --text2:   #1e293b;
+  --muted:   #64748b;
+  --dim:     #94a3b8;
+  --faint:   #cbd5e1;
+  --green:   #059669;
+  --green2:  #047857;
+  --blue:    #2563eb;
+  --amber:   #d97706;
+  --red:     #dc2626;
+  --purple:  #7c3aed;
+  --card-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  --input-bg: #ffffff;
+}
+
+/* ── BASE ── */
+* { box-sizing: border-box; }
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  margin: 0;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+
+/* ── REUSABLE ── */
+.card {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--card-shadow);
+  transition: background 0.3s, border-color 0.3s;
+}
+
+.btn-primary {
+  background: var(--green);
+  color: #fff;
+  font-weight: 700;
+  padding: 9px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: none;
+  font-size: 13px;
+  transition: all 0.18s;
+  display: inline-block;
+  text-decoration: none;
+  text-align: center;
+}
+.btn-primary:hover { background: var(--green2); transform: translateY(-1px); }
+
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border2);
+  color: var(--text);
+  padding: 9px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.15s;
+  display: inline-block;
+  text-decoration: none;
+  text-align: center;
+}
+.btn-outline:hover { border-color: var(--green); color: var(--green); }
+
+.input {
+  background: var(--input-bg);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  padding: 9px 12px;
+  color: var(--text);
+  font-size: 13px;
+  width: 100%;
+  outline: none;
+  transition: border-color 0.15s, background 0.3s;
+  font-family: inherit;
+}
+.input:focus { border-color: var(--green); }
+.input::placeholder { color: var(--dim); }
+
+/* ── BADGES ── */
+.badge { padding: 3px 9px; border-radius: 20px; font-size: 11px; font-weight: 700; display: inline-block; }
+.badge-green  { background: rgba(0,200,83,0.12);  color: var(--green); }
+.badge-blue   { background: rgba(88,166,255,0.12); color: var(--blue); }
+.badge-amber  { background: rgba(240,165,0,0.12);  color: var(--amber); }
+.badge-red    { background: rgba(248,81,73,0.12);  color: var(--red); }
+.badge-purple { background: rgba(137,87,229,0.12); color: var(--purple); }
+.badge-gray   { background: rgba(107,114,128,0.1); color: var(--muted); }
+
+[data-theme="light"] .badge-green  { background: rgba(5,150,105,0.1); }
+[data-theme="light"] .badge-blue   { background: rgba(37,99,235,0.1); }
+[data-theme="light"] .badge-amber  { background: rgba(217,119,6,0.1); }
+[data-theme="light"] .badge-red    { background: rgba(220,38,38,0.1); }
+[data-theme="light"] .badge-purple { background: rgba(124,58,237,0.1); }
+
+/* ── KEYFRAMES ── */
+@keyframes alertPulse { 0%,100%{border-color:rgba(0,200,83,0.3)} 50%{border-color:rgba(0,200,83,0.7)} }
+@keyframes blink      { 0%,100%{opacity:1} 50%{opacity:0.2} }
+@keyframes spin       { to{transform:rotate(360deg)} }
+@keyframes badgePulse { 0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.5)} 50%{box-shadow:0 0 0 4px rgba(239,68,68,0)} }
+@keyframes fadeUp     { from{opacity:0;transform:translateY(24px)} to{opacity:1;transform:translateY(0)} }
+@keyframes menuDrop   { from{opacity:0;transform:translateX(-50%) translateY(-10px) scale(0.97)} to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)} }
+@keyframes shimmer    { 0%{background-position:-200% 0} 100%{background-position:200% 0} }
+@keyframes marquee    { to{transform:translateX(-50%)} }
+@keyframes heroFloat  { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-12px)} }
+
+/* ── THEME-AWARE OVERLAY COLORS ── */
+:root {
+  --hover-bg: rgba(255,255,255,0.04);
+  --hover-bg2: rgba(255,255,255,0.07);
+  --active-bg: rgba(0,200,83,0.1);
+  --row-hover: rgba(255,255,255,0.02);
+  --surface: rgba(255,255,255,0.03);
+}
+[data-theme="light"] {
+  --hover-bg: rgba(0,0,0,0.04);
+  --hover-bg2: rgba(0,0,0,0.07);
+  --active-bg: rgba(5,150,105,0.08);
+  --row-hover: rgba(0,0,0,0.02);
+  --surface: rgba(0,0,0,0.02);
+}
+
+/* ── FORCE THEME VARS ON BODY/HTML ── */
+html[data-theme="light"],
+html[data-theme="light"] body {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+/* ── DASHBOARD LAYOUT THEMING ── */
+[data-theme="light"] aside,
+[data-theme="light"] nav {
+  background-color: var(--bg2) !important;
+  border-color: var(--border) !important;
+}
+
+/* ── TABLE ROW HOVER (light mode) ── */
+[data-theme="light"] tr:hover td {
+  background-color: rgba(0,0,0,0.02);
+}
+
+/* ── INPUT / SELECT THEMING ── */
+[data-theme="light"] input,
+[data-theme="light"] select,
+[data-theme="light"] textarea {
+  background-color: var(--bg2) !important;
+  color: var(--text) !important;
+  border-color: var(--border2) !important;
+}
+
+/* ── CARD BACKGROUNDS ── */
+[data-theme="light"] .card {
+  background-color: var(--bg2) !important;
+}
