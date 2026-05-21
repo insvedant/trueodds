@@ -88,12 +88,68 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const sw = collapsed ? 62 : 200
 
   return (
-    <div style={{ display:'flex', height:'100vh', overflow:'hidden', background:'var(--bg)' }}>
+    <div className="dashboard-wrapper" style={{ display:'flex', height:'100vh', overflow:'hidden', background:'var(--bg)' }}>
       <style>{`
         @keyframes spin       { to { transform:rotate(360deg) } }
         @keyframes badgePulse { 0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.5)} 50%{box-shadow:0 0 0 4px rgba(239,68,68,0)} }
         @keyframes slideDown  { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
         .sidebar-inner { transition: width 0.25s ease; }
+
+        /* ── Mobile bottom nav ── */
+        @media (max-width: 768px) {
+          .dashboard-wrapper { flex-direction: column !important; }
+          .sidebar-inner {
+            width: 100% !important;
+            height: 62px !important;
+            border-right: none !important;
+            border-top: 1px solid var(--border) !important;
+            position: fixed !important;
+            bottom: 0 !important; left: 0 !important; right: 0 !important;
+            z-index: 100 !important;
+            overflow: hidden !important;
+          }
+          .sidebar-inner > div:first-child { display: none !important; }
+          .sidebar-inner nav {
+            display: flex !important;
+            flex-direction: row !important;
+            padding: 0 !important;
+            overflow-x: auto !important;
+            overflow-y: hidden !important;
+            height: 62px !important;
+            align-items: stretch !important;
+            gap: 0 !important;
+            -ms-overflow-style: none !important;
+            scrollbar-width: none !important;
+          }
+          .sidebar-inner nav::-webkit-scrollbar { display: none !important; }
+          .sidebar-inner nav > div { position: static !important; flex-shrink: 0 !important; }
+          .sidebar-inner nav a {
+            flex-direction: column !important;
+            align-items: center !important;
+            justify-content: center !important;
+            padding: 6px 10px !important;
+            min-width: 58px !important;
+            border-left: none !important;
+            border-bottom: 2px solid transparent !important;
+            margin-bottom: 0 !important;
+            gap: 2px !important;
+            border-radius: 0 !important;
+          }
+          .sidebar-inner nav a > span:nth-child(2) {
+            font-size: 9px !important;
+            max-width: unset !important;
+            opacity: 1 !important;
+            overflow: visible !important;
+            white-space: nowrap !important;
+          }
+          .sidebar-inner > div:nth-child(3) { display: none !important; }
+          .sidebar-inner > div:nth-child(4) { display: none !important; }
+          main { padding-bottom: 70px !important; height: calc(100vh - 62px) !important; overflow: auto !important; }
+        }
+        @media (max-width: 380px) {
+          .sidebar-inner nav a { min-width: 46px !important; padding: 5px 6px !important; }
+          .sidebar-inner nav a > span:nth-child(2) { font-size: 8px !important; }
+        }
       `}</style>
 
       {/* Sidebar */}
