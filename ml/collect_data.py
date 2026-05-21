@@ -284,6 +284,8 @@ def resolve_old_arbs(db, current_event_ids: set, now: datetime):
 async def collect_snapshot():
     """Main collection function — fetches all sports and stores to MongoDB."""
     db  = get_db()
+    print("DB NAME:", db.name)
+print("COLLECTIONS:", db.list_collection_names())
     now = datetime.now(timezone.utc)
 
     logger.info(f"Starting odds collection at {now.isoformat()}")
