@@ -6,10 +6,28 @@ const http      = require('http')
 const { Server }= require('socket.io')
 const rateLimit = require('express-rate-limit')
 
+// Build allowed origins list from env + hardcoded www variants
+function getAllowedOrigins() {
+  const base = [
+    'http://localhost:3000',
+    'http://localhost:4000',
+  ]
+  const fe = process.env.FRONTEND_URL
+  if (fe) {
+    base.push(fe)
+    // Always add both www and non-www variants
+    if (fe.includes('://www.')) base.push(fe.replace('://www.', '://'))
+    else base.push(fe.replace('://', '://www.'))
+  }
+  // Always include both versions of trueodds.ca
+  base.push('https://trueodds.ca', 'https://www.trueodds.ca')
+  return base
+}
+
 const app    = express()
 const server = http.createServer(app)
 const io     = new Server(server, {
-  cors: { origin: process.env.FRONTEND_URL || 'http://localhost:3000', methods: ['GET','POST'] }
+  cors: { origin: getAllowedOrigins(), methods: ['GET','POST'], credentials: true }
 })
 
 // ── IMPORTANT: Stripe webhook needs raw body for signature verification ──
@@ -20,7 +38,7 @@ app.use('/api/webhook/stripe',
 )
 
 // ── Regular middleware ────────────────────────────────────────────────────
-app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000', credentials: true }))
+app.use(cors({ origin: getAllowedOrigins(), credentials: true }))
 app.use(express.json({ limit: '10kb' }))
 app.use(express.urlencoded({ extended: true }))
 
@@ -64,17 +82,20 @@ io.on('connection', socket => {
 
 // ── DB + Start ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 4000
+
+// Start listening FIRST so Render sees an open port immediately
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 TrueOdds backend running on port ${PORT}`)
+  const hasStripe = process.env.STRIPE_SECRET_KEY?.startsWith('sk_')
+  console.log(`💳 Stripe: ${hasStripe ? '✅ Configured' : '⚠️  Add STRIPE_SECRET_KEY'}`)
+})
+
+// Connect MongoDB after server is already listening
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
-    console.log('✅ MongoDB connected:', process.env.MONGODB_URI)
-    server.listen(PORT, () => {
-      console.log(`🚀 TrueOdds backend → http://localhost:${PORT}`)
-      const hasStripe = process.env.STRIPE_SECRET_KEY?.startsWith('sk_')
-      console.log(`💳 Stripe: ${hasStripe ? '✅ Configured' : '⚠️  Demo mode — add STRIPE_SECRET_KEY to .env'}`)
-    })
+    console.log('✅ MongoDB connected')
   })
   .catch(err => {
-    console.error('❌ MongoDB failed:', err.message)
-    console.error('   Run: mongod --dbpath /data/db')
-    process.exit(1)
+    console.error('❌ MongoDB error:', err.message)
+    // Do NOT exit — keep server running so Render does not mark as failed
   })
