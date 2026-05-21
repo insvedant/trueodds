@@ -192,3 +192,383 @@ html[data-theme="light"] body {
 [data-theme="light"] .card {
   background-color: var(--bg2) !important;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MOBILE RESPONSIVE — Full site, every page, every component
+   Breakpoints:
+     xs:  < 480px  (small phones)
+     sm:  < 640px  (phones)
+     md:  < 768px  (large phones / small tablets)
+     lg:  < 1024px (tablets)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── VIEWPORT & BASE ─────────────────────────────────────────────────────── */
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+img, video { max-width: 100%; height: auto; }
+table { width: 100%; }
+
+/* ── PUBLIC NAVBAR ───────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Hide desktop nav links, show hamburger */
+  .nav-links        { display: none !important; }
+  .nav-mobile-menu  { display: flex !important; }
+  .nav-cta-desktop  { display: none !important; }
+
+  /* Navbar padding */
+  nav[style*="height:64px"], nav[style*="height: 64px"] {
+    padding: 0 16px !important;
+  }
+}
+
+/* ── LANDING PAGE (page.tsx) ─────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Hero section */
+  .hero-headline    { font-size: 32px !important; line-height: 1.15 !important; }
+  .hero-sub         { font-size: 15px !important; }
+  .hero-buttons     { flex-direction: column !important; gap: 10px !important; width: 100% !important; }
+  .hero-buttons a, .hero-buttons button { width: 100% !important; text-align: center !important; }
+
+  /* Feature grid — 1 column on mobile */
+  .features-grid    { grid-template-columns: 1fr !important; }
+  .stats-row        { grid-template-columns: 1fr 1fr !important; gap: 12px !important; }
+  .books-marquee    { font-size: 12px !important; }
+
+  /* Section padding */
+  section { padding: 40px 16px !important; }
+}
+
+@media (max-width: 480px) {
+  .hero-headline    { font-size: 26px !important; }
+  .stats-row        { grid-template-columns: 1fr !important; }
+}
+
+/* ── LOGIN PAGE ──────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Two-column login → single column */
+  .login-grid       { grid-template-columns: 1fr !important; }
+  .login-left-panel { display: none !important; }
+  .login-right      { padding: 24px 20px !important; }
+  .login-card       { max-width: 100% !important; border-radius: 0 !important; min-height: 100vh !important; }
+}
+
+/* ── SIGNUP PAGE ─────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .signup-container { padding: 16px !important; }
+  .signup-card      { padding: 20px 16px !important; border-radius: 12px !important; }
+  .signup-grid-2    { grid-template-columns: 1fr !important; }
+  .plan-cards-grid  { grid-template-columns: 1fr !important; gap: 12px !important; }
+}
+
+/* ── PRICING PAGE ────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .pricing-grid     { grid-template-columns: 1fr !important; max-width: 420px !important; margin: 0 auto !important; }
+  .pricing-header   { font-size: 26px !important; }
+  .pricing-toggle   { flex-wrap: wrap !important; justify-content: center !important; }
+  .faq-grid         { grid-template-columns: 1fr !important; }
+}
+
+/* ── DASHBOARD LAYOUT ────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Sidebar becomes bottom nav on mobile */
+  .dashboard-wrapper {
+    flex-direction: column !important;
+  }
+
+  aside.sidebar-inner {
+    width: 100% !important;
+    height: auto !important;
+    border-right: none !important;
+    border-bottom: 1px solid var(--border) !important;
+    flex-direction: row !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    position: fixed !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    z-index: 100 !important;
+    background: var(--bg) !important;
+    padding: 0 !important;
+  }
+
+  /* Sidebar logo — hide on mobile bottom nav */
+  aside .logo-area  { display: none !important; }
+  aside .user-section { display: none !important; }
+  aside .theme-row  { display: none !important; }
+
+  /* Nav items in a row */
+  aside nav {
+    display: flex !important;
+    flex-direction: row !important;
+    padding: 0 !important;
+    gap: 0 !important;
+    overflow-x: auto !important;
+    width: 100% !important;
+  }
+
+  aside nav a {
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 8px 12px !important;
+    font-size: 10px !important;
+    min-width: 60px !important;
+    border-bottom: 2px solid transparent !important;
+    border-left: none !important;
+    gap: 3px !important;
+    white-space: nowrap !important;
+  }
+
+  aside nav a span:first-child { font-size: 20px !important; }
+
+  /* Main content — add bottom padding for fixed nav */
+  main { padding-bottom: 70px !important; }
+
+  /* Dashboard cards grid */
+  .dash-grid-2 { grid-template-columns: 1fr !important; }
+  .dash-stats  { grid-template-columns: 1fr 1fr !important; }
+}
+
+@media (max-width: 480px) {
+  .dash-stats  { grid-template-columns: 1fr 1fr !important; gap: 8px !important; }
+  aside nav a  { min-width: 52px !important; padding: 6px 8px !important; }
+}
+
+/* ── DASHBOARD HOME ──────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Period selector */
+  .period-row { flex-wrap: wrap !important; gap: 8px !important; }
+
+  /* P&L + Hot arbs grid → stacked */
+  .home-main-grid { grid-template-columns: 1fr !important; }
+
+  /* Quick links */
+  .quick-links-grid { grid-template-columns: repeat(3,1fr) !important; gap: 8px !important; }
+}
+
+@media (max-width: 480px) {
+  .quick-links-grid { grid-template-columns: repeat(2,1fr) !important; }
+}
+
+/* ── ARBITRAGE PAGE ──────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Arb cards — legs side by side → stacked */
+  .arb-legs-grid    { grid-template-columns: 1fr !important; }
+  .arb-header-row   { flex-direction: column !important; align-items: flex-start !important; gap: 8px !important; }
+  .arb-profit-row   { flex-direction: row !important; justify-content: space-between !important; }
+  .arb-filters      { flex-wrap: wrap !important; gap: 6px !important; }
+  .arb-controls     { flex-wrap: wrap !important; gap: 8px !important; }
+  .arb-stats-row    { grid-template-columns: 1fr 1fr !important; }
+}
+
+@media (max-width: 480px) {
+  .arb-stats-row    { grid-template-columns: 1fr 1fr !important; gap: 8px !important; }
+  .arb-legs-grid    { grid-template-columns: 1fr !important; }
+}
+
+/* ── POSITIVE EV PAGE ────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Table → cards on mobile */
+  .ev-table-header  { display: none !important; }
+  .ev-table-row     {
+    display: flex !important;
+    flex-direction: column !important;
+    padding: 14px !important;
+    gap: 6px !important;
+    border-bottom: 1px solid var(--border) !important;
+  }
+  .ev-table-row > span { display: block !important; font-size: 13px !important; }
+  .ev-stats-row     { grid-template-columns: 1fr 1fr !important; }
+  .ev-filters       { flex-wrap: wrap !important; }
+}
+
+/* ── LIVE ODDS PAGE ──────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Odds table — horizontal scroll */
+  .odds-table-wrap  { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; }
+  .odds-table-wrap table { min-width: 600px !important; }
+  .odds-game-header { flex-direction: column !important; align-items: flex-start !important; gap: 8px !important; }
+  .market-tabs      { flex-wrap: wrap !important; gap: 4px !important; }
+}
+
+/* ── BET TRACKER ─────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Tracker table → card rows */
+  .tracker-table-header { display: none !important; }
+  .tracker-row {
+    display: flex !important;
+    flex-direction: column !important;
+    padding: 14px 16px !important;
+    gap: 8px !important;
+    border-bottom: 1px solid var(--border) !important;
+  }
+  .tracker-row-main { font-size: 14px !important; font-weight: 600 !important; }
+  .tracker-row-meta { display: flex !important; flex-wrap: wrap !important; gap: 8px !important; font-size: 12px !important; color: var(--muted) !important; }
+
+  /* Add bet form */
+  .tracker-form-grid { grid-template-columns: 1fr !important; }
+  .tracker-form-grid-4 { grid-template-columns: 1fr 1fr !important; }
+  .tracker-stats { grid-template-columns: 1fr 1fr !important; }
+}
+
+/* ── ML INSIGHTS PAGE ────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .ml-tabs          { flex-wrap: wrap !important; gap: 0 !important; border-bottom: 1px solid var(--border) !important; }
+  .ml-tabs button   { padding: 8px 10px !important; font-size: 11px !important; }
+  .ml-stats-grid    { grid-template-columns: 1fr 1fr !important; }
+  .ml-models-grid   { grid-template-columns: 1fr !important; }
+  .ev-card-header   { flex-direction: column !important; align-items: flex-start !important; gap: 8px !important; }
+  .line-alert-card  { flex-direction: column !important; gap: 10px !important; }
+}
+
+/* ── ADMIN PAGES ─────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .admin-kpi-grid   { grid-template-columns: 1fr 1fr !important; }
+  .admin-grid-2     { grid-template-columns: 1fr !important; }
+  .admin-table      { overflow-x: auto !important; display: block !important; }
+  .admin-table table{ min-width: 500px !important; }
+  .admin-header     { flex-direction: column !important; align-items: flex-start !important; gap: 10px !important; }
+}
+
+@media (max-width: 480px) {
+  .admin-kpi-grid   { grid-template-columns: 1fr 1fr !important; gap: 8px !important; }
+}
+
+/* ── CALCULATORS PAGE ────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .calc-tabs        { flex-wrap: wrap !important; }
+  .calc-grid-2      { grid-template-columns: 1fr !important; }
+  .calc-result-row  { flex-direction: column !important; }
+}
+
+/* ── ALERTS PAGE ─────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .alerts-header    { flex-direction: column !important; align-items: flex-start !important; gap: 10px !important; }
+  .alert-card       { flex-direction: column !important; gap: 10px !important; }
+  .alert-actions    { flex-direction: row !important; justify-content: flex-end !important; }
+}
+
+/* ── PUBLIC PAGES (About, Blog, Contact, Privacy, Terms) ─────────────────── */
+@media (max-width: 768px) {
+  .public-hero      { padding: 60px 16px 40px !important; }
+  .public-hero h1   { font-size: 28px !important; }
+  .public-content   { padding: 24px 16px !important; max-width: 100% !important; }
+  .public-grid-2    { grid-template-columns: 1fr !important; }
+  .public-grid-3    { grid-template-columns: 1fr !important; }
+
+  /* Blog cards */
+  .blog-grid        { grid-template-columns: 1fr !important; }
+  .blog-card        { padding: 16px !important; }
+
+  /* Contact form */
+  .contact-grid     { grid-template-columns: 1fr !important; }
+  .contact-form     { padding: 20px 16px !important; }
+}
+
+/* ── FOOTER ──────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .footer-grid      { grid-template-columns: 1fr 1fr !important; gap: 24px !important; }
+  .footer-bottom    { flex-direction: column !important; text-align: center !important; gap: 8px !important; }
+}
+@media (max-width: 480px) {
+  .footer-grid      { grid-template-columns: 1fr !important; }
+}
+
+/* ── GLOBAL UTILITY OVERRIDES (inline styles on mobile) ─────────────────── */
+@media (max-width: 768px) {
+  /* Any element using display:grid with auto-fit and minwidth > viewport */
+  [style*="minmax(240px"] { grid-template-columns: 1fr !important; }
+  [style*="minmax(280px"] { grid-template-columns: 1fr !important; }
+  [style*="minmax(300px"] { grid-template-columns: 1fr !important; }
+  [style*="minmax(180px"] { grid-template-columns: 1fr 1fr !important; }
+  [style*="minmax(150px"] { grid-template-columns: 1fr 1fr !important; }
+
+  /* Page padding */
+  [style*="padding: '20px 24px'"],
+  [style*="padding:20px 24px"] {
+    padding: 16px !important;
+  }
+
+  /* Toast notifications — full width on mobile */
+  [style*="position: 'fixed'"][style*="bottom: 24"] {
+    left: 12px !important;
+    right: 12px !important;
+    width: auto !important;
+    min-width: unset !important;
+    max-width: unset !important;
+  }
+
+  /* Modals / cards */
+  [style*="maxWidth: 400"],
+  [style*="maxWidth: 420"],
+  [style*="maxWidth: 480"],
+  [style*="maxWidth: 520"] {
+    max-width: calc(100vw - 32px) !important;
+  }
+}
+
+/* ── TOUCH IMPROVEMENTS ──────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Bigger tap targets */
+  button, a, select, input[type="checkbox"], input[type="radio"] {
+    min-height: 36px;
+  }
+
+  /* Remove hover effects that break on touch */
+  @media (hover: none) {
+    .btn-primary:hover    { transform: none !important; }
+    .btn-outline:hover    { border-color: var(--border2) !important; color: var(--text) !important; }
+  }
+}
+
+/* ── PREVENT HORIZONTAL OVERFLOW ────────────────────────────────────────── */
+@media (max-width: 768px) {
+  body { overflow-x: hidden !important; }
+  .overflow-x-safe { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; }
+}
+
+/* ── DASHBOARD PAGE PADDING ON MOBILE ────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* All dashboard pages */
+  main > div[style*="padding"] {
+    padding: 14px 14px 80px !important;
+  }
+
+  /* Headings */
+  h1[style*="fontSize: 22"] { font-size: 18px !important; }
+  h1[style*="fontSize: 20"] { font-size: 17px !important; }
+}
+
+/* ── SPECIFIC SMALL SCREEN FIXES ─────────────────────────────────────────── */
+@media (max-width: 380px) {
+  aside nav a { min-width: 44px !important; padding: 5px 4px !important; font-size: 9px !important; }
+  aside nav a span:first-child { font-size: 17px !important; }
+  .dash-stats { grid-template-columns: 1fr 1fr !important; gap: 6px !important; }
+}
+
+/* ── RESPONSIVE TABLES ───────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .table-responsive { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; display: block !important; }
+  .table-responsive table { min-width: 480px !important; }
+}
+
+/* ── INLINE STYLE GRID OVERRIDES ─────────────────────────────────────────── */
+/* Override grid layouts defined as inline styles in dashboard pages */
+@media (max-width: 640px) {
+  /* Stat cards - 2 columns max */
+  div[style*="grid-template-columns: repeat(auto-fit"] {
+    grid-template-columns: 1fr 1fr !important;
+  }
+
+  /* Single wide items */
+  div[style*="gridTemplateColumns: '1fr 1fr'"] {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 400px) {
+  div[style*="grid-template-columns: repeat(auto-fit"] {
+    grid-template-columns: 1fr !important;
+  }
+}
+
