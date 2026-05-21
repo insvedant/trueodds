@@ -5,105 +5,174 @@ import { usePathname } from 'next/navigation'
 import { ThemeToggle } from '@/lib/theme'
 
 const NAV_LINKS = [
-  { href: '/dashboard/arbitrage', label: 'Arbitrage' },
+  { href: '/dashboard/arbitrage',   label: 'Arbitrage' },
   { href: '/dashboard/positive-ev', label: '+EV' },
-  { href: '/pricing', label: 'Pricing' },
-  { href: '/blog', label: 'Blog' },
-  { href: '/about', label: 'About' },
+  { href: '/pricing',               label: 'Pricing' },
+  { href: '/blog',                  label: 'Blog' },
+  { href: '/about',                 label: 'About' },
 ]
 
+const FOOTER_LINKS = {
+  Tools:   [{ label: 'Arbitrage Finder', href: '/dashboard/arbitrage' }, { label: '+EV Betting', href: '/dashboard/positive-ev' }, { label: 'Bet Tracker', href: '/dashboard/tracker' }, { label: 'Live Odds', href: '/dashboard/odds' }, { label: 'ML Insights', href: '/dashboard/insights' }],
+  Company: [{ label: 'About', href: '/about' }, { label: 'Pricing', href: '/pricing' }, { label: 'Blog', href: '/blog' }, { label: 'Contact', href: '/contact' }],
+  Legal:   [{ label: 'Privacy Policy', href: '/privacy' }, { label: 'Terms of Service', href: '/terms' }, { label: 'Responsible Gaming', href: '/responsible-gaming' }],
+}
+
 export function PublicNavbar() {
-  const [scrolled, setScrolled] = useState(false)
+  const [scrolled, setScrolled]   = useState(false)
+  const [menuOpen, setMenuOpen]   = useState(false)
   const pathname = usePathname()
 
   useEffect(() => {
     const fn = () => setScrolled(window.scrollY > 30)
-    window.addEventListener('scroll', fn)
+    window.addEventListener('scroll', fn, { passive: true })
     return () => window.removeEventListener('scroll', fn)
   }, [])
 
+  // Close menu on route change
+  useEffect(() => { setMenuOpen(false) }, [pathname])
+
   return (
-    <nav style={{
-      position: 'sticky', top: 0, zIndex: 100,
-      height: 60, display: 'flex', alignItems: 'center',
-      padding: '0 32px', justifyContent: 'space-between',
-      background: scrolled ? 'var(--bg2)' : 'var(--bg2)',
-      borderBottom: '1px solid var(--border)',
-      backdropFilter: 'blur(12px)',
-      transition: 'all 0.3s',
-    }}>
-      <Link href="/" style={{ fontWeight: 900, fontSize: 20, color: 'var(--text)', textDecoration: 'none', letterSpacing: '-0.5px' }}>
-        True<span style={{ color: 'var(--green)' }}>Odds</span>
-      </Link>
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        {NAV_LINKS.map(link => (
-          <Link key={link.href} href={link.href} style={{
-            color: pathname === link.href ? 'var(--text)' : 'var(--muted)',
-            textDecoration: 'none', fontSize: 14, fontWeight: pathname === link.href ? 700 : 400,
-            padding: '6px 12px', borderRadius: 8, transition: 'color 0.15s, background 0.15s',
-          }}
-            onMouseEnter={e => { e.currentTarget.style.color = 'var(--text)'; e.currentTarget.style.background = 'var(--hover-bg)' }}
-            onMouseLeave={e => { e.currentTarget.style.color = pathname === link.href ? 'var(--text)' : 'var(--muted)'; e.currentTarget.style.background = 'transparent' }}>
-            {link.label}
-          </Link>
-        ))}
-      </div>
-
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-        <ThemeToggle size="sm" />
-        <Link href="/login" style={{ color: 'var(--muted)', textDecoration: 'none', fontSize: 13, fontWeight: 500, padding: '7px 14px', border: '1px solid var(--border)', borderRadius: 8, transition: 'all 0.15s' }}
-          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border2)'; e.currentTarget.style.color = 'var(--text)' }}
-          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--muted)' }}>
-          Log in
+    <>
+      <nav style={{
+        position: 'fixed', top: 0, left: 0, right: 0, zIndex: 200,
+        height: 60,
+        background: scrolled ? 'var(--bg2)' : 'transparent',
+        backdropFilter: scrolled ? 'blur(12px)' : 'none',
+        borderBottom: scrolled ? '1px solid var(--border)' : 'none',
+        transition: 'all 0.2s ease',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '0 24px',
+      }}>
+        {/* Logo */}
+        <Link href="/" style={{ fontWeight: 900, fontSize: 20, color: 'var(--text)', textDecoration: 'none', letterSpacing: '-0.5px', flexShrink: 0 }}>
+          True<span style={{ color: 'var(--green)' }}>Odds</span>
         </Link>
-        <Link href="/signup" style={{ background: 'var(--green)', color: '#fff', textDecoration: 'none', fontSize: 13, fontWeight: 800, padding: '7px 16px', borderRadius: 8, display: 'inline-block', transition: 'all 0.18s' }}
-          onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 6px 20px rgba(0,200,83,0.3)' }}
-          onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none' }}>
-          Start Free →
-        </Link>
-      </div>
-    </nav>
+
+        {/* Desktop nav */}
+        <div className="nav-links" style={{ display: 'flex', alignItems: 'center', gap: 28 }}>
+          {NAV_LINKS.map(l => (
+            <Link key={l.href} href={l.href} style={{ fontSize: 13, fontWeight: 500, color: pathname === l.href ? 'var(--green)' : 'var(--muted)', textDecoration: 'none', transition: 'color 0.15s' }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--text)')}
+              onMouseLeave={e => (e.currentTarget.style.color = pathname === l.href ? 'var(--green)' : 'var(--muted)')}>
+              {l.label}
+            </Link>
+          ))}
+        </div>
+
+        {/* Desktop CTA */}
+        <div className="nav-cta-desktop" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <ThemeToggle size="sm" />
+          <Link href="/login" style={{ fontSize: 13, color: 'var(--muted)', textDecoration: 'none', padding: '7px 14px' }}>Log in</Link>
+          <Link href="/signup" style={{ background: 'var(--green)', color: '#fff', textDecoration: 'none', padding: '8px 18px', borderRadius: 8, fontSize: 13, fontWeight: 700 }}>Get Started</Link>
+        </div>
+
+        {/* Mobile right side */}
+        <div className="nav-mobile-menu" style={{ display: 'none', alignItems: 'center', gap: 10 }}>
+          <ThemeToggle size="sm" />
+          <button onClick={() => setMenuOpen(!menuOpen)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 6, color: 'var(--text)', display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <span style={{ display: 'block', width: 22, height: 2, background: 'var(--text)', borderRadius: 2, transition: 'all 0.2s', transform: menuOpen ? 'rotate(45deg) translate(5px,5px)' : 'none' }} />
+            <span style={{ display: 'block', width: 22, height: 2, background: 'var(--text)', borderRadius: 2, transition: 'all 0.2s', opacity: menuOpen ? 0 : 1 }} />
+            <span style={{ display: 'block', width: 22, height: 2, background: 'var(--text)', borderRadius: 2, transition: 'all 0.2s', transform: menuOpen ? 'rotate(-45deg) translate(5px,-5px)' : 'none' }} />
+          </button>
+        </div>
+      </nav>
+
+      {/* Mobile dropdown menu */}
+      {menuOpen && (
+        <div style={{ position: 'fixed', top: 60, left: 0, right: 0, zIndex: 199, background: 'var(--bg2)', borderBottom: '1px solid var(--border)', padding: '16px 0', boxShadow: '0 8px 32px rgba(0,0,0,0.3)' }}>
+          {NAV_LINKS.map(l => (
+            <Link key={l.href} href={l.href} style={{ display: 'block', padding: '12px 24px', fontSize: 15, fontWeight: 500, color: pathname === l.href ? 'var(--green)' : 'var(--text)', textDecoration: 'none', borderBottom: '1px solid var(--border)' }}>
+              {l.label}
+            </Link>
+          ))}
+          <div style={{ padding: '16px 24px', display: 'flex', gap: 10 }}>
+            <Link href="/login" style={{ flex: 1, textAlign: 'center', padding: '10px', background: 'var(--bg3)', border: '1px solid var(--border)', color: 'var(--text)', textDecoration: 'none', borderRadius: 8, fontSize: 14, fontWeight: 600 }}>Log in</Link>
+            <Link href="/signup" style={{ flex: 1, textAlign: 'center', padding: '10px', background: 'var(--green)', color: '#fff', textDecoration: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700 }}>Get Started</Link>
+          </div>
+        </div>
+      )}
+
+      {/* Spacer */}
+      <div style={{ height: 60 }} />
+    </>
   )
 }
 
 export function PublicFooter() {
-  const cols = [
-    { title: 'Product', links: [['Arbitrage', '/dashboard/arbitrage'], ['+EV Bets', '/dashboard/positive-ev'], ['Live Odds', '/dashboard/odds'], ['Bet Tracker', '/dashboard/tracker'], ['Calculators', '/dashboard/calculators']] },
-    { title: 'Company', links: [['About', '/about'], ['Blog', '/blog'], ['Contact', '/contact'], ['Pricing', '/pricing']] },
-    { title: 'Legal', links: [['Privacy Policy', '/privacy'], ['Terms', '/terms'], ['Responsible Gaming', '/responsible-gaming']] },
-  ]
-
   return (
-    <footer style={{ borderTop: '1px solid var(--border)', background: 'var(--bg2)', padding: '48px 24px 28px' }}>
-      <div style={{ maxWidth: 960, margin: '0 auto' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'auto repeat(3,1fr)', gap: 40, marginBottom: 40 }}>
+    <footer style={{ background: 'var(--bg2)', borderTop: '1px solid var(--border)', padding: '48px 24px 28px' }}>
+      <div style={{ maxWidth: 1100, margin: '0 auto' }}>
+        {/* Footer grid */}
+        <div className="footer-grid" style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', gap: 32, marginBottom: 40 }}>
+          {/* Brand */}
           <div>
-            <Link href="/" style={{ fontWeight: 900, fontSize: 20, color: 'var(--text)', textDecoration: 'none', letterSpacing: '-0.5px', display: 'block', marginBottom: 10 }}>
+            <div style={{ fontWeight: 900, fontSize: 20, marginBottom: 10, letterSpacing: '-0.5px' }}>
               True<span style={{ color: 'var(--green)' }}>Odds</span>
-            </Link>
-            <p style={{ color: 'var(--muted)', fontSize: 13, lineHeight: 1.75, maxWidth: 180 }}>Real-time arb and +EV tools for serious bettors.</p>
+            </div>
+            <p style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.75, maxWidth: 280, marginBottom: 16 }}>
+              Real-time arbitrage, +EV betting, and ML-powered insights for serious sports bettors.
+            </p>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              <Link href="/signup" style={{ background: 'var(--green)', color: '#fff', textDecoration: 'none', padding: '8px 18px', borderRadius: 8, fontSize: 12, fontWeight: 700, display: 'inline-block' }}>Start Free Trial</Link>
+              <Link href="/pricing" style={{ background: 'transparent', border: '1px solid var(--border2)', color: 'var(--text)', textDecoration: 'none', padding: '8px 18px', borderRadius: 8, fontSize: 12, display: 'inline-block' }}>View Pricing</Link>
+            </div>
           </div>
-          {cols.map(col => (
-            <div key={col.title}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: 14 }}>{col.title}</div>
-              {col.links.map(([label, href]) => (
-                <div key={label} style={{ marginBottom: 10 }}>
-                  <Link href={href} style={{ color: 'var(--muted)', textDecoration: 'none', fontSize: 13, transition: 'color 0.15s' }}
+
+          {/* Link columns */}
+          {Object.entries(FOOTER_LINKS).map(([title, links]) => (
+            <div key={title}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: 14 }}>{title}</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {links.map(l => (
+                  <Link key={l.href} href={l.href} style={{ fontSize: 13, color: 'var(--muted)', textDecoration: 'none', transition: 'color 0.15s' }}
                     onMouseEnter={e => (e.currentTarget.style.color = 'var(--text)')}
                     onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted)')}>
-                    {label}
+                    {l.label}
                   </Link>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           ))}
         </div>
-        <div style={{ borderTop: '1px solid var(--border)', paddingTop: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
-          <span style={{ color: 'var(--dim)', fontSize: 12 }}>© 2025 TrueOdds, LLC. All rights reserved.</span>
-          <span style={{ color: 'var(--dim)', fontSize: 11, maxWidth: 440 }}>For informational purposes only. Must be 21+. Problem gambling? 1-800-GAMBLER.</span>
+
+        {/* Bottom bar */}
+        <div className="footer-bottom" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 20, borderTop: '1px solid var(--border)', flexWrap: 'wrap', gap: 8 }}>
+          <div style={{ fontSize: 12, color: 'var(--dim)' }}>© {new Date().getFullYear()} TrueOdds. All rights reserved.</div>
+          <div style={{ fontSize: 12, color: 'var(--dim)' }}>Must be 21+ to use sportsbooks. Bet responsibly.</div>
+          <div style={{ display: 'flex', gap: 16 }}>
+            {[{ label: 'Privacy', href: '/privacy' }, { label: 'Terms', href: '/terms' }, { label: 'Responsible Gaming', href: '/responsible-gaming' }].map(l => (
+              <Link key={l.href} href={l.href} style={{ fontSize: 12, color: 'var(--dim)', textDecoration: 'none' }}>{l.label}</Link>
+            ))}
+          </div>
         </div>
       </div>
+
+      {/* Mobile bottom padding (for fixed bottom nav in dashboard) */}
+      <style>{`
+        @media (max-width: 768px) {
+          .footer-grid { grid-template-columns: 1fr 1fr !important; }
+          .footer-grid > div:first-child { grid-column: 1 / -1; }
+        }
+        @media (max-width: 480px) {
+          .footer-grid { grid-template-columns: 1fr !important; }
+        }
+        @media (max-width: 768px) {
+          .nav-links { display: none !important; }
+          .nav-cta-desktop { display: none !important; }
+          .nav-mobile-menu { display: flex !important; }
+        }
+      `}</style>
     </footer>
+  )
+}
+
+export default function PublicLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      <PublicNavbar />
+      <main>{children}</main>
+      <PublicFooter />
+    </>
   )
 }
