@@ -17,7 +17,7 @@ export default function AdminBetsPage() {
     (!sportFilter || b.sport === sportFilter)
   )
 
-  const sports = [...new Set((data?.bets || []).map((b: any) => b.sport))]
+  const sports = Array.from(new Set((data?.bets || []).map((b: any) => b.sport)))
   const card = { background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 10, padding: 18 }
 
   return (
