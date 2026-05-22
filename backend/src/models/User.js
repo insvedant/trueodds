@@ -10,7 +10,7 @@ const userSchema = new mongoose.Schema({
   role:     { type: String, enum: ['user','admin'], default: 'user' },
 
   // Plan & subscription
-  plan:               { type: String, enum: ['free','gold','platinum'], default: 'free' },
+  plan:               { type: String, enum: ['free','basic','gold','platinum'], default: 'free' },
   subscriptionStatus: { type: String, enum: ['active','inactive','cancelled','trial','past_due'], default: 'trial' },
   subscriptionStartDate: Date,
   subscriptionExpiry:    Date,
@@ -35,6 +35,13 @@ const userSchema = new mongoose.Schema({
   // Stores a secure random token + expiry for password reset via email
   passwordResetToken:   { type: String, select: false },  // hashed token in DB
   passwordResetExpires: { type: Date,   select: false },  // expires in 10 minutes
+
+  // Referral program
+  referralCode:       { type: String, unique: true, sparse: true },
+  referredBy:         { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  referralCount:      { type: Number, default: 0 },   // paying referrals
+  referralRewards:    { type: Number, default: 0 },   // months earned
+  freeMonthsGranted:  { type: Number, default: 0 },
 
   isActive:   { type: Boolean, default: true },
   lastLogin:  Date,
@@ -80,6 +87,9 @@ userSchema.methods.toPublicJSON = function() {
     totalPaid:          this.totalPaid,
     stripeCustomerId:   this.stripeCustomerId,
     hasPaymentMethod:   !!this.stripePaymentMethodId,
+    referralCode:       this.referralCode,
+    referralCount:      this.referralCount,
+    referralRewards:    this.referralRewards,
     createdAt:          this.createdAt,
     lastLogin:          this.lastLogin,
   }
