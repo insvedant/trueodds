@@ -34,4 +34,4 @@ const optionalAuth = async (req, res, next) => {
   next()
 }
 
-module.exports = { protect, adminOnly, requirePlan, optionalAuth }
+module.exports = { protect, adminOnly, requireAdmin: adminOnly, requirePlan, optionalAuth }
