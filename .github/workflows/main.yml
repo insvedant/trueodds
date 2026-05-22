@@ -2,7 +2,7 @@ name: ML Pipeline
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       job:
@@ -20,7 +20,7 @@ jobs:
     name: Collect Odds Snapshot
     if: "github.event_name == 'schedule' || github.event.inputs.job == 'collect' || github.event.inputs.job == 'both'"
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.11
@@ -31,7 +31,7 @@ jobs:
           cache-dependency-path: ml/requirements.txt
       - name: Install dependencies
         run: pip install -r ml/requirements.txt
-      - name: Run one collection snapshot
+      - name: Run collection snapshot
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
@@ -46,6 +46,9 @@ jobs:
           result = asyncio.run(collect_snapshot())
           print('Collection result:', result)
           "
+      - name: Report completion
+        if: always()
+        run: echo "Collection completed at $(date -u)"
 
   train:
     name: Retrain ML Models
