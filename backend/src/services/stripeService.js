@@ -15,21 +15,23 @@ const Stripe = require('stripe')
 
 // Demo key placeholder — replace with real key from stripe.com/dashboard
 const stripe = Stripe(
-  process.env.STRIPE_SECRET_KEY || 'sk_test_REPLACE_WITH_YOUR_STRIPE_SECRET_KEY'
+  process.env.STRIPE_SECRET_KEY || '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'
 )
 
 const TRIAL_DAYS = 7
 
 // Price IDs — set in .env when you have them
 const PRICE_IDS = {
+  basic:    process.env.STRIPE_PRICE_BASIC    || 'price_REPLACE_BASIC_MONTHLY',
   gold:     process.env.STRIPE_PRICE_GOLD     || 'price_REPLACE_GOLD_MONTHLY',
   platinum: process.env.STRIPE_PRICE_PLATINUM || 'price_REPLACE_PLATINUM_MONTHLY',
 }
 
 // Plan metadata for display / fallback
 const PLAN_META = {
-  gold:     { name: 'Gold',     price: 15.99 },
-  platinum: { name: 'Platinum', price: 49.99 },
+  basic:    { name: 'Basic',    price: 15.99 },
+  gold:     { name: 'Gold',     price: 49.99 },
+  platinum: { name: 'Platinum', price: 99.99 },
 }
 
 /**
