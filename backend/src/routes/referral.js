@@ -67,8 +67,8 @@ router.get('/me', protect, async (req, res) => {
 // ── GET /api/referral/admin/list ─────────────────────────────────────────
 router.get('/admin/list', protect, requireAdmin, async (req, res) => {
   try {
-    const page  = parseInt(req.query.page  as string) || 1
-    const limit = parseInt(req.query.limit as string) || 50
+   const page  = parseInt(req.query.page)  || 1
+const limit = parseInt(req.query.limit) || 50
     const skip  = (page - 1) * limit
 
     // Get all users who have made at least one referral
