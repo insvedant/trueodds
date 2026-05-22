@@ -45,7 +45,7 @@ def get_db():
 
 
 def save_model(model, name: str, metadata: dict = None):
-    """Save model + metadata to disk."""
+    """Save model + metadata to disk AND MongoDB for persistence across deployments."""
     path = os.path.join(MODEL_DIR, f"{name}.joblib")
     payload = {
         "model":      model,
@@ -53,17 +53,66 @@ def save_model(model, name: str, metadata: dict = None):
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "version":    "1.0",
     }
+    # Save to disk
     joblib.dump(payload, path)
     logger.success(f"Model saved: {path}")
+
+    # Also save to MongoDB as binary so GitHub Actions can persist models
+    try:
+        import io
+        from pymongo import MongoClient
+        from ml.config import MONGODB_URI, DB_NAME
+        buf = io.BytesIO()
+        joblib.dump(payload, buf)
+        buf.seek(0)
+        client = MongoClient(MONGODB_URI)
+        db = client[DB_NAME]
+        db["ml_models"].replace_one(
+            {"name": name},
+            {
+                "name": name,
+                "data": buf.read(),
+                "trained_at": datetime.now(timezone.utc).isoformat(),
+                "metadata": metadata or {},
+            },
+            upsert=True
+        )
+        client.close()
+        logger.success(f"Model also saved to MongoDB: {name}")
+    except Exception as e:
+        logger.warning(f"Could not save model to MongoDB: {e}")
+
     return path
 
 
 def load_model(name: str):
-    """Load model from disk. Returns None if not found."""
+    """Load model from disk, falling back to MongoDB if not on disk."""
     path = os.path.join(MODEL_DIR, f"{name}.joblib")
-    if not os.path.exists(path):
-        return None
-    return joblib.load(path)
+
+    # Try disk first
+    if os.path.exists(path):
+        return joblib.load(path)
+
+    # Fall back to MongoDB (for GitHub Actions / cloud deployments)
+    try:
+        import io
+        from pymongo import MongoClient
+        from ml.config import MONGODB_URI, DB_NAME
+        client = MongoClient(MONGODB_URI)
+        db = client[DB_NAME]
+        doc = db["ml_models"].find_one({"name": name})
+        client.close()
+        if doc and "data" in doc:
+            buf = io.BytesIO(doc["data"])
+            payload = joblib.load(buf)
+            # Cache to disk for future use
+            joblib.dump(payload, path)
+            logger.info(f"Model loaded from MongoDB: {name}")
+            return payload
+    except Exception as e:
+        logger.warning(f"Could not load model from MongoDB: {e}")
+
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────
