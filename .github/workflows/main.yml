@@ -3,7 +3,6 @@ name: ML Pipeline
 on:
   schedule:
     - cron: '*/5 * * * *'
-    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       job:
@@ -19,9 +18,7 @@ on:
 jobs:
   collect:
     name: Collect Odds Snapshot
-    if: |
-      (github.event_name == 'schedule' && github.event.schedule == '*/5 * * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.job == 'collect' || inputs.job == 'both'))
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.job != 'train' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 4
     steps:
@@ -52,9 +49,7 @@ print('Collection result:', result)
 
   train:
     name: Retrain ML Models
-    if: |
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.job == 'train' || inputs.job == 'both'))
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'train' || github.event.inputs.job == 'both')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
