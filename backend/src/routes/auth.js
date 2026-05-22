@@ -23,7 +23,7 @@ const sign = (id) => jwt.sign({ id }, process.env.JWT_SECRET, {
 // ── POST /api/auth/register ───────────────────────────────────────────────
 router.post('/register', async (req, res) => {
   try {
-    const { name, email, phone, password } = req.body
+    const { name, email, phone, password, referralCode } = req.body
 
     // Validation
     if (!name?.trim())     return res.status(400).json({ success: false, message: 'Name is required.' })
@@ -44,6 +44,13 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ success: false, message: 'An account with this email already exists.' })
     }
 
+    // Resolve referrer (if referral code provided)
+    let referrerId = null
+    if (referralCode) {
+      const referrer = await User.findOne({ referralCode: referralCode.toUpperCase() })
+      if (referrer) referrerId = referrer._id
+    }
+
     // Create user (password is hashed by pre-save hook)
     const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)
     const user = await User.create({
@@ -53,6 +60,7 @@ router.post('/register', async (req, res) => {
       password,
       trialEndsAt,
       subscriptionStatus: 'trial',
+      referredBy:         referrerId,
     })
 
     // Send welcome email (non-blocking — don't fail registration if email fails)
