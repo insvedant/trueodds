@@ -36,16 +36,7 @@ jobs:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
           PYTHONPATH: ${{ github.workspace }}
-        run: |
-          python -c "
-          import asyncio, sys
-          sys.path.insert(0, '.')
-          from ml.collect_data import collect_snapshot, setup_indexes, get_db
-          db = get_db()
-          setup_indexes(db)
-          result = asyncio.run(collect_snapshot())
-          print('Collection result:', result)
-          "
+        run: python ml/run_collect.py
       - name: Report completion
         if: always()
         run: echo "Collection completed at $(date -u)"
