@@ -18,7 +18,7 @@ on:
 jobs:
   collect:
     name: Collect Odds Snapshot
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.job != 'train' || github.event_name == 'schedule'
+    if: "github.event_name == 'schedule' || github.event.inputs.job == 'collect' || github.event.inputs.job == 'both'"
     runs-on: ubuntu-latest
     timeout-minutes: 4
     steps:
@@ -36,20 +36,20 @@ jobs:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
           PYTHONPATH: ${{ github.workspace }}
-        run: python -c "
-import asyncio
-import sys
-sys.path.insert(0, '.')
-from ml.collect_data import collect_snapshot, setup_indexes, get_db
-db = get_db()
-setup_indexes(db)
-result = asyncio.run(collect_snapshot())
-print('Collection result:', result)
-"
+        run: |
+          python -c "
+          import asyncio, sys
+          sys.path.insert(0, '.')
+          from ml.collect_data import collect_snapshot, setup_indexes, get_db
+          db = get_db()
+          setup_indexes(db)
+          result = asyncio.run(collect_snapshot())
+          print('Collection result:', result)
+          "
 
   train:
     name: Retrain ML Models
-    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'train' || github.event.inputs.job == 'both')
+    if: "github.event.inputs.job == 'train' || github.event.inputs.job == 'both'"
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
