@@ -54,9 +54,11 @@ router.post('/stripe',
           if (!user) break
 
           const amount = invoice.amount_paid / 100 // convert cents to dollars
+          const prevTotalPaid = user.totalPaid || 0
+
           user.subscriptionStatus  = 'active'
           user.subscriptionExpiry  = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
-          user.totalPaid           = (user.totalPaid || 0) + amount
+          user.totalPaid           = prevTotalPaid + amount
           user.payments.push({
             amount,
             plan:            user.plan,
@@ -64,7 +66,29 @@ router.post('/stripe',
             status:          'completed',
           })
           await user.save({ validateBeforeSave: false })
-          console.log(`Payment of $${amount} recorded for ${user.email}`)
+          console.log(`Payment of $${amount} recorded for ${user.email} (total: $${user.totalPaid})`)
+
+          // ── Referral reward automation ──────────────────────────────
+          // If this user was referred AND they just crossed the $50 threshold
+          const REFERRAL_THRESHOLD = 50
+          if (
+            user.referredBy &&
+            prevTotalPaid < REFERRAL_THRESHOLD &&
+            user.totalPaid >= REFERRAL_THRESHOLD
+          ) {
+            const referrer = await User.findById(user.referredBy)
+            if (referrer) {
+              referrer.referralRewards  = (referrer.referralRewards  || 0) + 1
+              referrer.referralCount    = (referrer.referralCount    || 0) + 1
+              // Extend referrer's subscription expiry by 1 month
+              const baseDate = referrer.subscriptionExpiry && referrer.subscriptionExpiry > new Date()
+                ? referrer.subscriptionExpiry
+                : new Date()
+              referrer.subscriptionExpiry = new Date(baseDate.getTime() + 30 * 24 * 60 * 60 * 1000)
+              await referrer.save({ validateBeforeSave: false })
+              console.log(`[Referral] 1 free month awarded to ${referrer.email} — ${user.email} crossed $${REFERRAL_THRESHOLD} threshold`)
+            }
+          }
           // TODO: send receipt email via SendGrid
           break
         }
