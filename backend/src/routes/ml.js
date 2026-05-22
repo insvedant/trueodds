@@ -10,10 +10,6 @@ const mongoose = require('mongoose')
 
 const ML_API = process.env.ML_API_URL || 'http://localhost:8000'
 
-/**
- * Proxy a request to the ML FastAPI server
- * Falls back gracefully if ML service is not running
- */
 async function mlFetch(path, options = {}) {
   try {
     const res = await fetch(`${ML_API}${path}`, {
@@ -55,6 +51,32 @@ router.get('/health', async (req, res) => {
   })
 })
 
+// ── GET /api/ml/predictions/batch ────────────────────────────────────────
+router.get('/predictions/batch', protect, async (req, res) => {
+  try {
+    const db   = mongoose.connection.db
+    const now  = new Date()
+    const ago  = new Date(now - 48 * 60 * 60 * 1000)
+
+    const predictions = await db.collection('ml_predictions')
+      .find({ generated_at: { $gte: ago.toISOString() } }, { projection: { _id: 0 } })
+      .sort({ generated_at: -1 })
+      .limit(20)
+      .toArray()
+
+    const final = predictions.length > 0 ? predictions :
+      await db.collection('ml_predictions')
+        .find({}, { projection: { _id: 0 } })
+        .sort({ generated_at: -1 })
+        .limit(20)
+        .toArray()
+
+    res.json({ success: true, count: final.length, predictions: final })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
+  }
+})
+
 // ── GET /api/ml/predictions/:eventId ─────────────────────────────────────
 router.get('/predictions/:eventId', protect, async (req, res) => {
   try {
@@ -68,7 +90,6 @@ router.get('/predictions/:eventId', protect, async (req, res) => {
       return res.json({ success: true, source: 'cache', prediction: pred })
     }
 
-    // Not in MongoDB — ask ML service directly
     const live = await mlFetch(`/predictions/${req.params.eventId}`)
     res.json({ success: true, source: 'live', prediction: live })
   } catch (err) {
@@ -77,7 +98,6 @@ router.get('/predictions/:eventId', protect, async (req, res) => {
 })
 
 // ── GET /api/ml/sharp-money ───────────────────────────────────────────────
-// Events with sharp money signals — Gold+ only
 router.get('/sharp-money', protect, requirePlan('gold', 'platinum'), async (req, res) => {
   try {
     const data = await mlFetch('/sharp-money')
@@ -88,7 +108,6 @@ router.get('/sharp-money', protect, requirePlan('gold', 'platinum'), async (req,
 })
 
 // ── GET /api/ml/arb-windows ───────────────────────────────────────────────
-// Arb opportunities with ML window predictions
 router.get('/arb-windows', protect, async (req, res) => {
   try {
     const data = await mlFetch('/arb-windows')
@@ -99,7 +118,6 @@ router.get('/arb-windows', protect, async (req, res) => {
 })
 
 // ── POST /api/ml/score-ev ─────────────────────────────────────────────────
-// Score a single EV bet — Platinum only
 router.post('/score-ev', protect, requirePlan('platinum'), async (req, res) => {
   try {
     const data = await mlFetch('/predict/ev', {
@@ -113,7 +131,6 @@ router.post('/score-ev', protect, requirePlan('platinum'), async (req, res) => {
 })
 
 // ── GET /api/ml/insights ──────────────────────────────────────────────────
-// Personal edge analysis for the logged-in user
 router.get('/insights', protect, async (req, res) => {
   try {
     const data = await mlFetch(`/insights/${req.user._id}`)
@@ -124,7 +141,6 @@ router.get('/insights', protect, async (req, res) => {
 })
 
 // ── GET /api/ml/dashboard ─────────────────────────────────────────────────
-// Admin: ML pipeline stats + recent predictions
 router.get('/dashboard', protect, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'Admin only' })
