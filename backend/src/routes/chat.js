@@ -7,6 +7,7 @@ const { protect, requireAdmin } = require('../middleware/auth')
 const ChatConversation = require('../models/ChatConversation')
 const ChatMessage      = require('../models/ChatMessage')
 const User             = require('../models/User')
+const { notifyNewChatMessage, notifyNewConversation } = require('../services/telegramService')
 
 // ── POST /api/chat/send ───────────────────────────────────────────────────
 // REST fallback for when socket isn't connected
@@ -14,6 +15,8 @@ router.post('/send', protect, async (req, res) => {
   try {
     const { text, conversationId } = req.body
     if (!text?.trim()) return res.status(400).json({ success: false, message: 'Message text required.' })
+
+    const isNewConvo = !conversationId
 
     let convo = conversationId
       ? await ChatConversation.findById(conversationId)
@@ -28,11 +31,31 @@ router.post('/send', protect, async (req, res) => {
       text:     text.trim().slice(0, 2000),
     })
 
+    const isNewConvo = !conversationId
+
     await ChatConversation.findByIdAndUpdate(convo._id, {
       lastMessage:   text.trim().slice(0, 100),
       lastMessageAt: new Date(),
       $inc:          { unreadAdmin: 1 },
     })
+
+    // Fire Telegram notification (non-blocking — never delays the response)
+    const sender = req.user
+    if (isNewConvo) {
+      notifyNewConversation({
+        userName:  sender.name,
+        userEmail: sender.email,
+        userPlan:  sender.plan,
+      }).catch(() => {})
+    } else {
+      notifyNewChatMessage({
+        userName:       sender.name,
+        userEmail:      sender.email,
+        userPlan:       sender.plan,
+        messageText:    text.trim(),
+        conversationId: convo._id,
+      }).catch(() => {})
+    }
 
     res.json({ success: true, message: msg, conversation: convo, conversationId: convo._id })
   } catch (err) {
@@ -71,6 +94,37 @@ router.get('/unread', protect, async (req, res) => {
     res.json({ success: true, unread: convo?.unreadUser || 0 })
   } catch {
     res.json({ success: true, unread: 0 })
+  }
+})
+
+// ── POST /api/chat/admin/send ──────────────────────────────────────────────
+// Admin sends a reply via REST (no WebSocket needed)
+router.post('/admin/send', protect, requireAdmin, async (req, res) => {
+  try {
+    const { text, conversationId } = req.body
+    if (!text?.trim())      return res.status(400).json({ success: false, message: 'Message text required.' })
+    if (!conversationId)    return res.status(400).json({ success: false, message: 'conversationId required.' })
+
+    const convo = await ChatConversation.findById(conversationId)
+    if (!convo) return res.status(404).json({ success: false, message: 'Conversation not found.' })
+
+    const msg = await ChatMessage.create({
+      conversation: convo._id,
+      sender:       'admin',
+      senderId:     req.user._id,
+      text:         text.trim().slice(0, 2000),
+    })
+
+    await ChatConversation.findByIdAndUpdate(convo._id, {
+      lastMessage:   text.trim().slice(0, 100),
+      lastMessageAt: new Date(),
+      status:        'active',
+      $inc:          { unreadUser: 1 },
+    })
+
+    res.json({ success: true, message: msg })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
   }
 })
 
