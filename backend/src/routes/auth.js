@@ -141,6 +141,37 @@ router.put('/profile', protect, async (req, res) => {
   }
 })
 
+// ── POST /api/auth/change-email ───────────────────────────────────────────
+// Requires current password to confirm identity before changing email
+router.post('/change-email', protect, async (req, res) => {
+  try {
+    const { newEmail, currentPassword } = req.body
+
+    if (!newEmail?.trim())    return res.status(400).json({ success: false, message: 'New email is required.' })
+    if (!currentPassword)     return res.status(400).json({ success: false, message: 'Current password is required.' })
+    if (!newEmail.includes('@')) return res.status(400).json({ success: false, message: 'Invalid email address.' })
+
+    // Verify password
+    const userWithPw = await User.findById(req.user._id).select('+password')
+    if (!(await userWithPw.comparePassword(currentPassword))) {
+      return res.status(401).json({ success: false, message: 'Incorrect password.' })
+    }
+
+    // Check email not already taken
+    const existing = await User.findOne({ email: newEmail.toLowerCase().trim() })
+    if (existing && existing._id.toString() !== req.user._id.toString()) {
+      return res.status(400).json({ success: false, message: 'That email is already in use.' })
+    }
+
+    req.user.email = newEmail.toLowerCase().trim()
+    await req.user.save({ validateBeforeSave: false })
+
+    res.json({ success: true, message: 'Email updated successfully.', user: req.user.toPublicJSON() })
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message })
+  }
+})
+
 // ── POST /api/auth/forgot-password ───────────────────────────────────────
 // Sends a password reset link to the user's Gmail
 router.post('/forgot-password', async (req, res) => {
