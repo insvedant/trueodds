@@ -17,7 +17,7 @@ const { protect }  = require('../middleware/auth')
 const { sendPasswordResetEmail, sendWelcomeEmail } = require('../services/emailService')
 
 const sign = (id) => jwt.sign({ id }, process.env.JWT_SECRET, {
-  expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+  expiresIn: process.env.JWT_EXPIRES_IN || '30d',
 })
 
 // ── POST /api/auth/register ───────────────────────────────────────────────
