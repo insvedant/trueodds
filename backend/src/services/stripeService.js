@@ -15,7 +15,7 @@ const Stripe = require('stripe')
 
 // Demo key placeholder — replace with real key from stripe.com/dashboard
 const stripe = Stripe(
-  process.env.STRIPE_SECRET_KEY || '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'
+  process.env.STRIPE_SECRET_KEY || 'sk_test_REPLACE_WITH_YOUR_STRIPE_SECRET_KEY'
 )
 
 const TRIAL_DAYS = 7
@@ -57,7 +57,7 @@ async function createSubscriptionWithTrial({ name, email, planId, paymentMethodI
     items:       [{ price: PRICE_IDS[planId] }],
     trial_period_days: TRIAL_DAYS,
     payment_settings: {
-      payment_method_types: ['card'],
+      payment_method_types: ['card', 'paypal'],
       save_default_payment_method: 'on_subscription',
     },
     expand: ['latest_invoice.payment_intent'],
@@ -87,7 +87,7 @@ async function cancelSubscription(stripeSubscriptionId) {
 async function createSetupIntent(stripeCustomerId) {
   return stripe.setupIntents.create({
     customer: stripeCustomerId,
-    payment_method_types: ['card'],
+    payment_method_types: ['card', 'paypal'],
   })
 }
 
