@@ -46,6 +46,13 @@ module.exports = function initChatSocket(io) {
       if (convo) socket.join(`convo_${convo._id}`)
     }
 
+    // ── User joins their conversation room explicitly ──────────────────────
+    socket.on('user_join', async ({ conversationId }) => {
+      if (isAdmin || !conversationId) return
+      socket.join(`convo_${conversationId}`)
+      console.log(`[Chat] User ${user.name} joined room convo_${conversationId}`)
+    })
+
     // ── User sends a message ───────────────────────────────────────────────
     socket.on('user_message', async ({ text, conversationId }) => {
       try {
