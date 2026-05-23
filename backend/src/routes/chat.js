@@ -8,6 +8,38 @@ const ChatConversation = require('../models/ChatConversation')
 const ChatMessage      = require('../models/ChatMessage')
 const User             = require('../models/User')
 
+// ── POST /api/chat/send ───────────────────────────────────────────────────
+// REST fallback for when socket isn't connected
+router.post('/send', protect, async (req, res) => {
+  try {
+    const { text, conversationId } = req.body
+    if (!text?.trim()) return res.status(400).json({ success: false, message: 'Message text required.' })
+
+    let convo = conversationId
+      ? await ChatConversation.findById(conversationId)
+      : await ChatConversation.findOne({ user: req.user._id, status: { $ne: 'resolved' } })
+
+    if (!convo) convo = await ChatConversation.create({ user: req.user._id })
+
+    const msg = await ChatMessage.create({
+      conversation: convo._id,
+      sender:   'user',
+      senderId: req.user._id,
+      text:     text.trim().slice(0, 2000),
+    })
+
+    await ChatConversation.findByIdAndUpdate(convo._id, {
+      lastMessage:   text.trim().slice(0, 100),
+      lastMessageAt: new Date(),
+      $inc:          { unreadAdmin: 1 },
+    })
+
+    res.json({ success: true, message: msg, conversationId: convo._id })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
+  }
+})
+
 // ── GET /api/chat/my-conversation ────────────────────────────────────────
 // Get or create a conversation for the current user
 router.get('/my-conversation', protect, async (req, res) => {
