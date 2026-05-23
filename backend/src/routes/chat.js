@@ -34,7 +34,7 @@ router.post('/send', protect, async (req, res) => {
       $inc:          { unreadAdmin: 1 },
     })
 
-    res.json({ success: true, message: msg, conversationId: convo._id })
+    res.json({ success: true, message: msg, conversation: convo, conversationId: convo._id })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
   }
