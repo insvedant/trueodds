@@ -10,7 +10,6 @@ const User             = require('../models/User')
 const { notifyNewChatMessage, notifyNewConversation } = require('../services/telegramService')
 
 // ── POST /api/chat/send ───────────────────────────────────────────────────
-// REST fallback for when socket isn't connected
 router.post('/send', protect, async (req, res) => {
   try {
     const { text, conversationId } = req.body
@@ -31,15 +30,12 @@ router.post('/send', protect, async (req, res) => {
       text:     text.trim().slice(0, 2000),
     })
 
-    const isNewConvo = !conversationId
-
     await ChatConversation.findByIdAndUpdate(convo._id, {
       lastMessage:   text.trim().slice(0, 100),
       lastMessageAt: new Date(),
       $inc:          { unreadAdmin: 1 },
     })
 
-    // Fire Telegram notification (non-blocking — never delays the response)
     const sender = req.user
     if (isNewConvo) {
       notifyNewConversation({
@@ -64,7 +60,6 @@ router.post('/send', protect, async (req, res) => {
 })
 
 // ── GET /api/chat/my-conversation ────────────────────────────────────────
-// Get or create a conversation for the current user
 router.get('/my-conversation', protect, async (req, res) => {
   try {
     let convo = await ChatConversation.findOne({ user: req.user._id, status: { $ne: 'resolved' } })
@@ -77,7 +72,6 @@ router.get('/my-conversation', protect, async (req, res) => {
     const messages = await ChatMessage.find({ conversation: convo._id })
       .sort({ createdAt: 1 }).limit(100)
 
-    // Mark user's unread as 0 when they open conversation
     await ChatConversation.findByIdAndUpdate(convo._id, { unreadUser: 0 })
 
     res.json({ success: true, conversation: convo, messages })
@@ -87,7 +81,6 @@ router.get('/my-conversation', protect, async (req, res) => {
 })
 
 // ── GET /api/chat/unread ──────────────────────────────────────────────────
-// Get unread count for current user
 router.get('/unread', protect, async (req, res) => {
   try {
     const convo = await ChatConversation.findOne({ user: req.user._id, status: { $ne: 'resolved' } })
@@ -97,13 +90,12 @@ router.get('/unread', protect, async (req, res) => {
   }
 })
 
-// ── POST /api/chat/admin/send ──────────────────────────────────────────────
-// Admin sends a reply via REST (no WebSocket needed)
+// ── POST /api/chat/admin/send ─────────────────────────────────────────────
 router.post('/admin/send', protect, requireAdmin, async (req, res) => {
   try {
     const { text, conversationId } = req.body
-    if (!text?.trim())      return res.status(400).json({ success: false, message: 'Message text required.' })
-    if (!conversationId)    return res.status(400).json({ success: false, message: 'conversationId required.' })
+    if (!text?.trim())   return res.status(400).json({ success: false, message: 'Message text required.' })
+    if (!conversationId) return res.status(400).json({ success: false, message: 'conversationId required.' })
 
     const convo = await ChatConversation.findById(conversationId)
     if (!convo) return res.status(404).json({ success: false, message: 'Conversation not found.' })
@@ -129,7 +121,6 @@ router.post('/admin/send', protect, requireAdmin, async (req, res) => {
 })
 
 // ── GET /api/chat/admin/conversations ─────────────────────────────────────
-// Admin: get all conversations with user info
 router.get('/admin/conversations', protect, requireAdmin, async (req, res) => {
   try {
     const status = req.query.status || 'all'
@@ -147,7 +138,6 @@ router.get('/admin/conversations', protect, requireAdmin, async (req, res) => {
 })
 
 // ── GET /api/chat/admin/conversations/:id ─────────────────────────────────
-// Admin: get messages for a specific conversation
 router.get('/admin/conversations/:id', protect, requireAdmin, async (req, res) => {
   try {
     const convo = await ChatConversation.findById(req.params.id)
@@ -158,7 +148,6 @@ router.get('/admin/conversations/:id', protect, requireAdmin, async (req, res) =
     const messages = await ChatMessage.find({ conversation: convo._id })
       .sort({ createdAt: 1 }).limit(200)
 
-    // Mark admin unread as 0
     await ChatConversation.findByIdAndUpdate(convo._id, { unreadAdmin: 0 })
 
     res.json({ success: true, conversation: convo, messages })
@@ -168,7 +157,6 @@ router.get('/admin/conversations/:id', protect, requireAdmin, async (req, res) =
 })
 
 // ── PATCH /api/chat/admin/conversations/:id/status ────────────────────────
-// Admin: update conversation status
 router.patch('/admin/conversations/:id/status', protect, requireAdmin, async (req, res) => {
   try {
     const { status } = req.body
@@ -183,7 +171,6 @@ router.patch('/admin/conversations/:id/status', protect, requireAdmin, async (re
 })
 
 // ── GET /api/chat/admin/unread ─────────────────────────────────────────────
-// Admin: total unread messages count
 router.get('/admin/unread', protect, requireAdmin, async (req, res) => {
   try {
     const result = await ChatConversation.aggregate([
