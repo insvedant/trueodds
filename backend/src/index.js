@@ -58,6 +58,7 @@ app.use('/api/auth',          require('./routes/auth'))
 app.use('/api/subscriptions', require('./routes/subscriptions'))
 app.use('/api/hedge',         require('./routes/hedge'))
 app.use('/api/referral',      require('./routes/referral'))
+app.use('/api/chat',          require('./routes/chat'))
 app.use('/api',               require('./routes/odds'))
 app.use('/api/bets',          require('./routes/bets'))
 app.use('/api/alerts',        require('./routes/alerts'))
@@ -73,14 +74,18 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: 'Internal server error.' })
 })
 
-// ── Socket.io — live odds push ─────────────────────────────────────────────
+// ── Socket.io — live odds push + chat ──────────────────────────────────────
 io.on('connection', socket => {
-  console.log('Client connected:', socket.id)
+  // Live odds updates (existing functionality)
   const interval = setInterval(() => {
-    socket.emit('odds_update', { timestamp: new Date(), message: 'Live odds updated' })
+    socket.emit('odds_update', { timestamp: new Date() })
   }, 10000)
-  socket.on('disconnect', () => { clearInterval(interval) })
+  socket.on('disconnect', () => clearInterval(interval))
 })
+
+// Chat socket (separate namespace to avoid conflicts)
+const chatIo = io.of('/chat')
+require('./services/chatSocket')(chatIo)
 
 // ── DB + Start ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 4000
