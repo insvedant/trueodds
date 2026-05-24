@@ -5,7 +5,7 @@
  */
 
 const router   = require('express').Router()
-const { protect } = require('../middleware/auth')
+const { protect, requirePlan } = require('../middleware/auth')
 const mongoose = require('mongoose')
 
 // Simple Alert schema (inline — no separate model file needed)
@@ -24,7 +24,7 @@ const alertSchema = new mongoose.Schema({
 const Alert = mongoose.models.Alert || mongoose.model('Alert', alertSchema)
 
 // ── GET /api/alerts ───────────────────────────────────────────────────────
-router.get('/', protect, async (req, res) => {
+router.get('/', protect, requirePlan('basic', 'gold', 'platinum'), async (req, res) => {
   try {
     const { limit = 50 } = req.query
     const alerts = await Alert.find({ user: req.user._id })
