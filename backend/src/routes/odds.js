@@ -56,19 +56,25 @@ router.get('/odds', optionalAuth, async (req, res) => {
 })
 
 // ── GET /api/arbitrage ────────────────────────────────────────────────────
-// Arbitrage opportunities — requires auth
+// Arbitrage opportunities — free plan gets 3 results as preview
 router.get('/arbitrage', protect, async (req, res) => {
   try {
     const { minProfit = 0, sport } = req.query
     const { data, source } = await getArbitrage(parseFloat(minProfit), sport && sport !== 'All' ? sport : null)
 
+    const plan = req.user?.plan || 'free'
+    const isFree = plan === 'free'
+    const limited = isFree ? data.slice(0, 3) : data
+
     res.json({
-      success: true,
+      success:  true,
       source,
-      count:  data.length,
-      hot:    data.filter(a => a.hot).length,
-      data,
-      quota:  getQuotaInfo(),
+      count:    limited.length,
+      total:    data.length,
+      limited:  isFree,
+      hot:      limited.filter(a => a.hot).length,
+      data:     limited,
+      quota:    getQuotaInfo(),
     })
   } catch (err) {
     console.error('Arb route error:', err.message)
