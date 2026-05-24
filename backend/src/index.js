@@ -59,6 +59,7 @@ app.use('/api/subscriptions', require('./routes/subscriptions'))
 app.use('/api/hedge',         require('./routes/hedge'))
 app.use('/api/referral',      require('./routes/referral'))
 app.use('/api/chat',          require('./routes/chat'))
+app.use('/api/telegram',      require('./routes/telegram'))
 app.use('/api',               require('./routes/odds'))
 app.use('/api/bets',          require('./routes/bets'))
 app.use('/api/alerts',        require('./routes/alerts'))
@@ -95,6 +96,10 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 TrueOdds backend running on port ${PORT}`)
   const hasStripe = process.env.STRIPE_SECRET_KEY?.startsWith('sk_')
   console.log(`💳 Stripe: ${hasStripe ? '✅ Configured' : '⚠️  Add STRIPE_SECRET_KEY'}`)
+
+  // Auto-register Telegram webhook on startup
+  const { registerWebhook } = require('./services/telegramService')
+  registerWebhook().catch(() => {})
 })
 
 // Connect MongoDB after server is already listening
