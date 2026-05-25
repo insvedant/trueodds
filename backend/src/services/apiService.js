@@ -268,7 +268,17 @@ const SPORT_LABELS = {
 function transformOdds(games, sportKey, market) {
   const sport = SPORT_LABELS[sportKey] || sportKey
 
-  return games.map(game => {
+  const now = Date.now()
+
+  return games
+    .filter(game => {
+      // Only show live games (no commence_time = in-progress) or upcoming games
+      if (!game.commence_time) return true
+      const gameTime = new Date(game.commence_time).getTime()
+      // Keep games that started within last 3 hours (live) or haven't started yet
+      return gameTime >= now - 3 * 60 * 60 * 1000
+    })
+    .map(game => {
     const allBooks = {}
 
     for (const bm of game.bookmakers || []) {
@@ -308,6 +318,7 @@ function transformOdds(games, sportKey, market) {
       }),
       league:  game.sport_title,
       markets: [{ name: market === 'h2h' ? 'Moneyline' : market, rows }],
+      isLive: game.commence_time ? new Date(game.commence_time).getTime() <= now : false,
     }
   }).filter(g => g.markets[0].rows.length > 0)
 }
