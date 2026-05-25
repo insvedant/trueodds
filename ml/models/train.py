@@ -38,6 +38,12 @@ from ml.features import build_features_for_event, build_training_dataset, americ
 
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+# ── CI fast mode — fewer estimators when running on GitHub Actions ────────
+CI_MODE = os.environ.get('CI_TRAINING', '').lower() == 'true'
+N_ESTIMATORS_LARGE  = 50  if CI_MODE else 200
+N_ESTIMATORS_MEDIUM = 40  if CI_MODE else 150
+logger.info(f"Training mode: {'CI-FAST (n_estimators reduced)' if CI_MODE else 'FULL'}")
+
 
 def get_db():
     client = MongoClient(MONGODB_URI)
@@ -210,7 +216,7 @@ def train_clv_model(db) -> dict:
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     model = xgb.XGBRegressor(
-        n_estimators=200,
+        n_estimators=N_ESTIMATORS_LARGE,
         max_depth=5,
         learning_rate=0.05,
         subsample=0.8,
@@ -321,7 +327,7 @@ def train_sharp_money_model(db) -> dict:
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     model = xgb.XGBClassifier(
-        n_estimators=200,
+        n_estimators=N_ESTIMATORS_LARGE,
         max_depth=4,
         learning_rate=0.05,
         scale_pos_weight=len(y[y == 0]) / max(len(y[y == 1]), 1),
@@ -432,7 +438,7 @@ def train_arb_window_model(db) -> dict:
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     model = GradientBoostingRegressor(
-        n_estimators=150, max_depth=4,
+        n_estimators=N_ESTIMATORS_MEDIUM, max_depth=4,
         learning_rate=0.08, random_state=42,
     )
     model.fit(X_train, y_train)
@@ -551,7 +557,7 @@ def train_ev_confidence_model(db) -> dict:
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     model = xgb.XGBClassifier(
-        n_estimators=150, max_depth=4,
+        n_estimators=N_ESTIMATORS_MEDIUM, max_depth=4,
         learning_rate=0.05, random_state=42,
         verbosity=0, use_label_encoder=False,
         eval_metric="logloss",
