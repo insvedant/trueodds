@@ -36,7 +36,7 @@ router.get('/odds', optionalAuth, async (req, res) => {
             ...mkt,
             rows: mkt.rows.map(row => ({
               ...row,
-              books: Object.fromEntries(Object.entries(row.books).slice(0, 3)),
+              books: Object.fromEntries(Object.entries(row.books).slice(0, 2)),
             })),
           })),
         }))
