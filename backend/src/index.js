@@ -43,8 +43,9 @@ app.use(express.json({ limit: '10kb' }))
 app.use(express.urlencoded({ extended: true }))
 
 // Rate limiting
-app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 300, message: { success: false, message: 'Too many requests.' } }))
-app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }))
+app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500, message: { success: false, message: 'Too many requests.' } }))
+app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: { success: false, message: 'Too many login attempts. Please wait 15 minutes.' } }))
+app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }))
 
 // ── Routes ────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({
