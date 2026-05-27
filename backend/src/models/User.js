@@ -73,6 +73,15 @@ userSchema.methods.createPasswordResetToken = function() {
 }
 
 // ── Public JSON (never expose password, tokens) ───────────────────────────
+  alertPrefs: {
+    emailAlerts:    { type: Boolean, default: true },   // master on/off
+    arbThreshold:   { type: Number,  default: 2.0 },    // min % to trigger
+    evThreshold:    { type: Number,  default: 3.0 },    // min EV% to trigger
+    sports:         { type: [String], default: [] },    // [] = all sports
+    hotDealsOnly:   { type: Boolean, default: false },  // only 5%+ deals
+    lastEmailedAt:  { type: Date,    default: null },
+  },
+
 userSchema.methods.toPublicJSON = function() {
   return {
     id:                 this._id,
@@ -90,9 +99,11 @@ userSchema.methods.toPublicJSON = function() {
     referralCode:       this.referralCode,
     referralCount:      this.referralCount,
     referralRewards:    this.referralRewards,
+    alertPrefs:         this.alertPrefs,
     createdAt:          this.createdAt,
     lastLogin:          this.lastLogin,
   }
 }
 
 module.exports = mongoose.model('User', userSchema)
+
