@@ -1,23 +1,11 @@
-/**
- * webhook.js — Stripe Webhook endpoint
- *
- * Mount at POST /api/webhook/stripe (requires raw body — see index.js)
- *
- * Events handled:
- *   customer.subscription.trial_will_end   → send reminder email (3 days before)
- *   invoice.payment_succeeded              → activate subscription, record payment
- *   invoice.payment_failed                 → mark as past_due
- *   customer.subscription.deleted         → mark as cancelled
- *   customer.subscription.updated         → sync plan changes
- */
+
 
 const router = require('express').Router()
 const User   = require('../models/User')
 const { constructWebhookEvent } = require('../services/stripeService')
 
 router.post('/stripe',
-  // NOTE: express.raw() must be applied to this route in index.js
-  // so Stripe can verify the signature — do NOT use express.json() here
+  require('express').raw({ type: 'application/json' }),
   async (req, res) => {
     const sig = req.headers['stripe-signature']
 
@@ -34,26 +22,26 @@ router.post('/stripe',
     try {
       switch (event.type) {
 
-        // ── Trial ending in 3 days ─────────────────────────────────────
+        
         case 'customer.subscription.trial_will_end': {
           const sub  = event.data.object
           const user = await User.findOne({ stripeCustomerId: sub.customer })
           if (user) {
             console.log(`Trial ending soon for ${user.email} — send reminder email here`)
-            // TODO: send email via SendGrid
+            
           }
           break
         }
 
-        // ── Successful payment (trial ends → first charge, or renewal) ─
+        
         case 'invoice.payment_succeeded': {
           const invoice = event.data.object
-          if (invoice.billing_reason === 'subscription_create') break // free trial started, no charge yet
+          if (invoice.billing_reason === 'subscription_create') break 
 
           const user = await User.findOne({ stripeCustomerId: invoice.customer })
           if (!user) break
 
-          const amount = invoice.amount_paid / 100 // convert cents to dollars
+          const amount = invoice.amount_paid / 100 
           const prevTotalPaid = user.totalPaid || 0
 
           user.subscriptionStatus  = 'active'
@@ -68,8 +56,8 @@ router.post('/stripe',
           await user.save({ validateBeforeSave: false })
           console.log(`Payment of $${amount} recorded for ${user.email} (total: $${user.totalPaid})`)
 
-          // ── Referral reward automation ──────────────────────────────
-          // If this user was referred AND they just crossed the $50 threshold
+          
+          
           const REFERRAL_THRESHOLD = 50
           if (
             user.referredBy &&
@@ -80,7 +68,7 @@ router.post('/stripe',
             if (referrer) {
               referrer.referralRewards  = (referrer.referralRewards  || 0) + 1
               referrer.referralCount    = (referrer.referralCount    || 0) + 1
-              // Extend referrer's subscription expiry by 1 month
+              
               const baseDate = referrer.subscriptionExpiry && referrer.subscriptionExpiry > new Date()
                 ? referrer.subscriptionExpiry
                 : new Date()
@@ -89,11 +77,11 @@ router.post('/stripe',
               console.log(`[Referral] 1 free month awarded to ${referrer.email} — ${user.email} crossed $${REFERRAL_THRESHOLD} threshold`)
             }
           }
-          // TODO: send receipt email via SendGrid
+          
           break
         }
 
-        // ── Payment failed ─────────────────────────────────────────────
+        
         case 'invoice.payment_failed': {
           const invoice = event.data.object
           const user = await User.findOne({ stripeCustomerId: invoice.customer })
@@ -101,12 +89,12 @@ router.post('/stripe',
             user.subscriptionStatus = 'past_due'
             await user.save({ validateBeforeSave: false })
             console.log(`Payment failed for ${user.email} — marked past_due`)
-            // TODO: send payment failure email via SendGrid
+            
           }
           break
         }
 
-        // ── Subscription cancelled (by user or Stripe after failures) ──
+        
         case 'customer.subscription.deleted': {
           const sub  = event.data.object
           const user = await User.findOne({ stripeSubscriptionId: sub.id })
@@ -120,7 +108,7 @@ router.post('/stripe',
           break
         }
 
-        // ── Subscription updated (plan change, etc.) ───────────────────
+        
         case 'customer.subscription.updated': {
           const sub  = event.data.object
           const user = await User.findOne({ stripeSubscriptionId: sub.id })
