@@ -5,8 +5,9 @@
  */
 
 const router   = require('express').Router()
-const { protect, requirePlan } = require('../middleware/auth')
+const { protect, requirePlan, adminOnly } = require('../middleware/auth')
 const mongoose = require('mongoose')
+const { runAlertScheduler } = require('../services/alertScheduler')
 
 // Simple Alert schema (inline — no separate model file needed)
 const alertSchema = new mongoose.Schema({
@@ -80,6 +81,48 @@ router.post('/create', async (req, res) => {
     }
     const alert = await Alert.create({ user: userId, type, title, message, value, sport, eventId })
     res.json({ success: true, alert })
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message })
+  }
+})
+
+// ── PUT /api/alerts/prefs ─────────────────────────────────────────────────
+// Update alert preferences
+router.put('/prefs', protect, requirePlan('basic', 'gold', 'platinum'), async (req, res) => {
+  try {
+    const { emailAlerts, arbThreshold, evThreshold, sports, hotDealsOnly } = req.body
+    const plan = req.user.plan
+
+    // Basic plan: enforce 2% minimum — not negotiable
+    let arbMin = plan === 'basic' ? 2.0 : 1.0
+    let evMin  = plan === 'basic' ? 3.0 : 1.0
+
+    const update = {}
+    if (emailAlerts  !== undefined) update['alertPrefs.emailAlerts']  = emailAlerts
+    if (hotDealsOnly !== undefined) update['alertPrefs.hotDealsOnly'] = hotDealsOnly
+    if (Array.isArray(sports))      update['alertPrefs.sports']       = sports
+
+    // Only allow threshold changes for gold/platinum
+    if (['gold','platinum'].includes(plan)) {
+      if (arbThreshold !== undefined) update['alertPrefs.arbThreshold'] = Math.max(arbMin, parseFloat(arbThreshold))
+      if (evThreshold  !== undefined) update['alertPrefs.evThreshold']  = Math.max(evMin,  parseFloat(evThreshold))
+    }
+
+    const User = require('../models/User')
+    await User.updateOne({ _id: req.user._id }, { $set: update })
+    res.json({ success: true, message: 'Alert preferences updated.' })
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message })
+  }
+})
+
+// ── POST /api/alerts/run-scheduler ───────────────────────────────────────
+// Admin trigger to manually run the alert scheduler
+router.post('/run-scheduler', protect, adminOnly, async (req, res) => {
+  try {
+    res.json({ success: true, message: 'Scheduler started — check server logs.' })
+    // Run async after responding so request doesn't time out
+    runAlertScheduler().catch(err => console.error('[Scheduler]', err.message))
   } catch (e) {
     res.status(500).json({ success: false, message: e.message })
   }
