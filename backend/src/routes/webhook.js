@@ -21,8 +21,6 @@ router.post('/stripe',
 
     try {
       switch (event.type) {
-
-        
         case 'customer.subscription.trial_will_end': {
           const sub  = event.data.object
           const user = await User.findOne({ stripeCustomerId: sub.customer })
@@ -32,8 +30,6 @@ router.post('/stripe',
           }
           break
         }
-
-        
         case 'invoice.payment_succeeded': {
           const invoice = event.data.object
           if (invoice.billing_reason === 'subscription_create') break 
@@ -80,8 +76,6 @@ router.post('/stripe',
           
           break
         }
-
-        
         case 'invoice.payment_failed': {
           const invoice = event.data.object
           const user = await User.findOne({ stripeCustomerId: invoice.customer })
@@ -93,8 +87,6 @@ router.post('/stripe',
           }
           break
         }
-
-        
         case 'customer.subscription.deleted': {
           const sub  = event.data.object
           const user = await User.findOne({ stripeSubscriptionId: sub.id })
@@ -107,8 +99,6 @@ router.post('/stripe',
           }
           break
         }
-
-        
         case 'customer.subscription.updated': {
           const sub  = event.data.object
           const user = await User.findOne({ stripeSubscriptionId: sub.id })
@@ -121,7 +111,6 @@ router.post('/stripe',
           }
           break
         }
-
         default:
           console.log(`Unhandled webhook event: ${event.type}`)
       }
