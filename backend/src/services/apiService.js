@@ -25,8 +25,7 @@ const SPORTS = [
   'icehockey_nhl',
   'icehockey_nhl_championship_winner',
   'americanfootball_nfl',
-  'americanfootball_cfl',
-  'icehockey_ahl',
+  'americanfootball_nfl_preseason',
   'soccer_epl',
   'soccer_uefa_champs_league',
   'soccer_uefa_europa_league',
@@ -36,14 +35,17 @@ const SPORTS = [
   'soccer_italy_serie_a',
   'soccer_usa_mls',
   'soccer_canada_cpl',
+  'soccer_brazil_campeonato',
+  'soccer_argentina_primera_division',
   'soccer_fifa_world_cup',
   'mma_mixed_martial_arts',
+  'boxing_boxing',
   'tennis_atp_french_open',
   'tennis_wta_french_open',
-  'tennis_atp_us_open',
-  'tennis_wta_us_open',
   'tennis_atp_wimbledon',
   'tennis_wta_wimbledon',
+  'tennis_atp_us_open',
+  'tennis_wta_us_open',
 ]
 
 let quotaState = {
@@ -106,7 +108,7 @@ async function getOdds(sport = 'americanfootball_nfl', market = 'h2h') {
   const url = [
     `${ODDS_BASE}/sports/${sport}/odds`,
     `?apiKey=${ODDS_API_KEY}`,
-    `&regions=us,us2,uk,au`,
+    `&regions=us,us2,uk,au,ca`,
     `&markets=${market}`,
     `&oddsFormat=american`,
     `&bookmakers=${ALL_BOOKS.join(',')}`,
