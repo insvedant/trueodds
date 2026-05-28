@@ -26,6 +26,7 @@ const SPORTS = [
   'icehockey_nhl_championship_winner',
   'americanfootball_nfl',
   'americanfootball_nfl_preseason',
+  'americanfootball_cfl',
   'soccer_epl',
   'soccer_uefa_champs_league',
   'soccer_uefa_europa_league',
@@ -246,6 +247,7 @@ const SPORT_LABELS = {
   soccer_germany_bundesliga:              'Soccer',
   soccer_spain_la_liga:                   'Soccer',
   soccer_italy_serie_a:                   'Soccer',
+  americanfootball_cfl:                   'CFL',
   soccer_usa_mls:                         'Soccer',
   soccer_canada_cpl:                      'Soccer',
   soccer_fifa_world_cup:                  'Soccer',
@@ -448,6 +450,7 @@ function getSportKey(label) {
   const map = {
     NFL:    'americanfootball_nfl',
     CFL:    'americanfootball_cfl',
+    CFL:    'americanfootball_cfl',
     NBA:    'basketball_nba',
     MLB:    'baseball_mlb',
     NHL:    'icehockey_nhl',
@@ -462,6 +465,7 @@ function getSportKey(label) {
 function getMockSports() {
   return [
     { key: 'americanfootball_nfl',    title: 'NFL',          active: true },
+    { key: 'americanfootball_cfl',    title: 'CFL',          active: true },
     { key: 'americanfootball_cfl',    title: 'CFL',          active: true },
     { key: 'basketball_nba',          title: 'NBA',          active: true },
     { key: 'baseball_mlb',            title: 'MLB',          active: true },
