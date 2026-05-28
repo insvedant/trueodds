@@ -43,10 +43,15 @@ app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 30, messag
 app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }))
 
 app.get('/health', (req, res) => res.json({
-  status: 'ok',
-  env: process.env.NODE_ENV || 'development',
-  db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-  stripe: process.env.STRIPE_SECRET_KEY?.startsWith('sk_') ? 'configured' : 'demo_mode',
+  status:   'ok',
+  env:      process.env.NODE_ENV || 'development',
+  db:       mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+  stripe:   process.env.STRIPE_SECRET_KEY?.startsWith('sk_') ? 'configured' : 'missing',
+  zoho:     (process.env.ZOHO_USER && process.env.ZOHO_PASSWORD) ? 'configured' : 'missing',
+  telegram: (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) ? 'configured' : 'missing',
+  stripeBasic:    process.env.STRIPE_PRICE_BASIC    ? 'set' : 'missing',
+  stripeGold:     process.env.STRIPE_PRICE_GOLD     ? 'set' : 'missing',
+  stripePlatinum: process.env.STRIPE_PRICE_PLATINUM ? 'set' : 'missing',
 }))
 
 app.use('/api/auth',          require('./routes/auth'))
