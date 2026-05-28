@@ -49,9 +49,9 @@ app.get('/health', (req, res) => res.json({
   stripe:   process.env.STRIPE_SECRET_KEY?.startsWith('sk_') ? 'configured' : 'missing',
   zoho:     (process.env.ZOHO_USER && process.env.ZOHO_PASSWORD) ? 'configured' : 'missing',
   telegram: (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) ? 'configured' : 'missing',
-  stripeBasic:    process.env.STRIPE_PRICE_BASIC    ? 'set' : 'missing',
-  stripeGold:     process.env.STRIPE_PRICE_GOLD     ? 'set' : 'missing',
-  stripePlatinum: process.env.STRIPE_PRICE_PLATINUM ? 'set' : 'missing',
+  stripeBasic:    (process.env.STRIPE_PRICE_BASIC_MONTHLY || process.env.STRIPE_PRICE_BASIC)    ? 'set' : 'missing',
+  stripeGold:     (process.env.STRIPE_PRICE_GOLD_MONTHLY  || process.env.STRIPE_PRICE_GOLD)     ? 'set' : 'missing',
+  stripePlatinum: (process.env.STRIPE_PRICE_PLATINUM_MONTHLY || process.env.STRIPE_PRICE_PLATINUM) ? 'set' : 'missing',
 }))
 
 app.use('/api/auth',          require('./routes/auth'))
