@@ -3,9 +3,10 @@ const { protect, adminOnly } = require('../middleware/auth')
 const { getSetting, setSetting, getAllSettings } = require('../models/SiteSettings')
 
 const DEFAULTS = {
-  instagram:  '',
-  twitter:    '',
-  discord:    '',
+  instagram: '',
+  twitter:   '',
+  discord:   '',
+  facebook:  '',
 }
 
 router.get('/public', async (req, res) => {
@@ -33,7 +34,7 @@ router.get('/', protect, adminOnly, async (req, res) => {
 
 router.put('/', protect, adminOnly, async (req, res) => {
   try {
-    const allowed = ['instagram', 'twitter', 'discord']
+    const allowed = ['instagram', 'twitter', 'discord', 'facebook']
     for (const key of allowed) {
       if (req.body[key] !== undefined) {
         await setSetting(key, req.body[key])
