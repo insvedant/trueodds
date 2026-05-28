@@ -1,14 +1,4 @@
-/**
- * odds.js — Live Odds, Arbitrage, and +EV routes
- *
- * All data flows through apiService.js which:
- *   1. Checks MongoDB cache first (no API call if data is fresh)
- *   2. Falls back to TheOddsAPI if cache is stale
- *   3. Falls back to mock data if API key not configured
- *
- * Response always includes:
- *   { success, data, source: 'cache'|'api'|'mock', cachedAt, quotaRemaining }
- */
+
 
 const router     = require('express').Router()
 const { protect, optionalAuth, requirePlan } = require('../middleware/auth')
@@ -17,17 +7,19 @@ const {
   getScores, getSportKey, getQuotaInfo,
 } = require('../services/apiService')
 
-// ── GET /api/odds ─────────────────────────────────────────────────────────
-// Live odds comparison across sportsbooks
-// Free plan gets fewer books; Gold/Platinum get all books
 router.get('/odds', optionalAuth, async (req, res) => {
   try {
     const { sport = 'NFL', market = 'h2h' } = req.query
-    const sportKey = getSportKey(sport)
 
-    const { data, source } = await getOdds(sportKey, market)
+    const { data: allData, source } = (sport === 'All' || sport === 'Soccer')
+      ? await getAllOdds()
+      : await getOdds(getSportKey(sport), market)
 
-    // Gate: free plan users see fewer books per row
+    const data = (sport === 'Soccer')
+      ? allData.filter(g => g.sport === 'Soccer')
+      : allData
+
+    
     const limited = (!req.user || req.user.plan === 'free')
     const gated   = limited
       ? data.map(game => ({
@@ -55,8 +47,6 @@ router.get('/odds', optionalAuth, async (req, res) => {
   }
 })
 
-// ── GET /api/arbitrage ────────────────────────────────────────────────────
-// Arbitrage opportunities — free plan gets 3 results as preview
 router.get('/arbitrage', protect, async (req, res) => {
   try {
     const { minProfit = 0, sport } = req.query
@@ -82,8 +72,6 @@ router.get('/arbitrage', protect, async (req, res) => {
   }
 })
 
-// ── GET /api/ev ───────────────────────────────────────────────────────────
-// +EV bets — requires Gold or Platinum plan
 router.get('/ev', protect, requirePlan('gold', 'platinum'), async (req, res) => {
   try {
     const { minEV = 0, sport } = req.query
@@ -102,8 +90,6 @@ router.get('/ev', protect, requirePlan('gold', 'platinum'), async (req, res) => 
   }
 })
 
-// ── GET /api/scores ───────────────────────────────────────────────────────
-// Live scores & fixtures from APISports
 router.get('/scores', optionalAuth, async (req, res) => {
   try {
     const { sport = 'NBA', date } = req.query
@@ -121,8 +107,6 @@ router.get('/scores', optionalAuth, async (req, res) => {
   }
 })
 
-// ── GET /api/quota ────────────────────────────────────────────────────────
-// API quota status (admin use)
 router.get('/quota', protect, (req, res) => {
   res.json({ success: true, quota: getQuotaInfo() })
 })
