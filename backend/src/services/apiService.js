@@ -1,21 +1,4 @@
-/**
- * apiService.js
- * ─────────────────────────────────────────────────────────────────────────
- * Smart caching layer — paid TheOddsAPI plan ($119/mo, 100k req/month)
- *
- * Paid plan cache strategy:
- *   ODDS:      1 minute   (60 req/hr × 24hr × 30 days = 43,200/mo — well within 100k)
- *   SCORES:    10 minutes
- *   TEAM_META: 24 hours   (never changes)
- *
- * Flow:
- *   Request → MongoDB cache fresh? → serve instantly
- *          → cache stale → call TheOddsAPI → cache → serve
- *          → API key missing → serve mock fallback
- *
- * All external API calls happen ONLY in this file.
- * Frontend never touches any sports API directly.
- */
+
 
 const Cache = require('../models/Cache')
 
@@ -23,42 +6,51 @@ const ODDS_API_KEY  = process.env.THEODDSAPI_KEY
 const ODDS_BASE     = 'https://api.the-odds-api.com/v4'
 const SPORTSDB_BASE = 'https://www.thesportsdb.com/api/v1/json/3'
 
-// ── Paid plan TTL settings ────────────────────────────────────────────────
 const TTL = {
-  ODDS:      1  * 60,          // 1 minute  — paid plan can afford this
-  SCORES:    10 * 60,          // 10 minutes
-  TEAM_META: 24 * 60 * 60,    // 24 hours
+  ODDS:      1  * 60,          
+  SCORES:    10 * 60,          
+  TEAM_META: 24 * 60 * 60,    
 }
 
-// All books supported on paid plan
 const ALL_BOOKS = [
   'draftkings', 'fanduel', 'betmgm', 'caesars', 'pointsbet',
   'bet365', 'pinnacle', 'bovada', 'williamhill_us', 'barstool',
   'mybookieag', 'betonlineag', 'lowvig', 'superbook',
 ]
 
-// Sports tracked — paid plan gets all of them
 const SPORTS = [
-  'americanfootball_nfl',
-  'americanfootball_nfl_super_bowl_winner',
   'basketball_nba',
+  'basketball_nba_championship_winner',
   'baseball_mlb',
   'icehockey_nhl',
+  'icehockey_nhl_championship_winner',
+  'americanfootball_nfl',
+  'americanfootball_cfl',
+  'icehockey_ahl',
   'soccer_epl',
   'soccer_uefa_champs_league',
+  'soccer_uefa_europa_league',
+  'soccer_france_ligue_one',
+  'soccer_germany_bundesliga',
+  'soccer_spain_la_liga',
+  'soccer_italy_serie_a',
+  'soccer_usa_mls',
+  'soccer_canada_cpl',
+  'soccer_fifa_world_cup',
   'mma_mixed_martial_arts',
   'tennis_atp_french_open',
   'tennis_wta_french_open',
+  'tennis_atp_us_open',
+  'tennis_wta_us_open',
+  'tennis_atp_wimbledon',
+  'tennis_wta_wimbledon',
 ]
 
-// Quota tracking — updated from response headers
 let quotaState = {
   remaining: null,
   used:      null,
   lastCheck: null,
 }
-
-// ── Fetch helpers ─────────────────────────────────────────────────────────
 
 function isKeyConfigured() {
   return ODDS_API_KEY &&
@@ -72,7 +64,7 @@ async function fetchJSON(url, headers = {}) {
     signal: AbortSignal.timeout(10_000),
   })
 
-  // Update quota from headers
+  
   const remaining = res.headers.get('x-requests-remaining')
   const used      = res.headers.get('x-requests-used')
   if (remaining !== null) {
@@ -90,8 +82,6 @@ async function fetchJSON(url, headers = {}) {
   return res.json()
 }
 
-// ── SPORTS LIST ───────────────────────────────────────────────────────────
-
 async function getSports() {
   const key     = 'sports:list'
   const cached  = await Cache.get(key)
@@ -105,8 +95,6 @@ async function getSports() {
   await Cache.set(key, data, TTL.TEAM_META, 'api')
   return { data, source: 'api' }
 }
-
-// ── LIVE ODDS ─────────────────────────────────────────────────────────────
 
 async function getOdds(sport = 'americanfootball_nfl', market = 'h2h') {
   const key    = `odds:${sport}:${market}`
@@ -137,7 +125,6 @@ async function getAllOdds() {
 
   if (!isKeyConfigured()) return { data: [], source: 'mock' }
 
-  // Fetch all sports concurrently — paid plan can handle this
   const results = await Promise.allSettled(
     SPORTS.map(sport => getOdds(sport, 'h2h'))
   )
@@ -149,11 +136,11 @@ async function getAllOdds() {
     }
   }
 
-  await Cache.set(key, combined, TTL.ODDS, 'api')
-  return { data: combined, source: 'api' }
+  if (combined.length > 0) {
+    await Cache.set(key, combined, TTL.ODDS, 'api')
+  }
+  return { data: combined, source: combined.length > 0 ? 'api' : 'empty' }
 }
-
-// ── ARBITRAGE ENGINE ──────────────────────────────────────────────────────
 
 async function getArbitrage(minProfit = 0, sport = null) {
   const key    = `arb:${sport || 'all'}:${minProfit}`
@@ -169,8 +156,6 @@ async function getArbitrage(minProfit = 0, sport = null) {
   return { data: arbs, source }
 }
 
-// ── +EV ENGINE ────────────────────────────────────────────────────────────
-
 async function getPositiveEV(minEV = 0, sport = null) {
   const key    = `ev:${sport || 'all'}:${minEV}`
   const cached = await Cache.get(key)
@@ -184,8 +169,6 @@ async function getPositiveEV(minEV = 0, sport = null) {
   await Cache.set(key, evBets, TTL.ODDS, source)
   return { data: evBets, source }
 }
-
-// ── SCORES ────────────────────────────────────────────────────────────────
 
 async function getScores(sport = 'NBA') {
   const key    = `scores:${sport}`
@@ -213,8 +196,6 @@ async function getScores(sport = 'NBA') {
   return { data, source: 'api' }
 }
 
-// ── TEAM META (TheSportsDB — free, no key) ────────────────────────────────
-
 async function getTeamLogo(teamName) {
   const key    = `team:${teamName.toLowerCase().replace(/\s/g, '_')}`
   const cached = await Cache.get(key)
@@ -237,8 +218,6 @@ async function getTeamLogo(teamName) {
   }
 }
 
-// ── QUOTA INFO ────────────────────────────────────────────────────────────
-
 function getQuotaInfo() {
   return {
     remaining:           quotaState.remaining,
@@ -250,19 +229,33 @@ function getQuotaInfo() {
   }
 }
 
-// ── ODDS TRANSFORMER ──────────────────────────────────────────────────────
-
 const SPORT_LABELS = {
-  americanfootball_nfl:              'NFL',
+  americanfootball_nfl:                   'NFL',
   americanfootball_nfl_super_bowl_winner: 'NFL',
-  basketball_nba:                    'NBA',
-  baseball_mlb:                      'MLB',
-  icehockey_nhl:                     'NHL',
-  soccer_epl:                        'Soccer',
-  soccer_uefa_champs_league:         'Soccer',
-  mma_mixed_martial_arts:            'UFC',
-  tennis_atp_french_open:            'Tennis',
-  tennis_wta_french_open:            'Tennis',
+  basketball_nba:                         'NBA',
+  basketball_nba_championship_winner:     'NBA',
+  baseball_mlb:                           'MLB',
+  icehockey_nhl:                          'NHL',
+  icehockey_nhl_championship_winner:      'NHL',
+  soccer_epl:                             'Soccer',
+  soccer_uefa_champs_league:              'Soccer',
+  soccer_uefa_europa_league:              'Soccer',
+  soccer_france_ligue_one:                'Soccer',
+  soccer_germany_bundesliga:              'Soccer',
+  soccer_spain_la_liga:                   'Soccer',
+  soccer_italy_serie_a:                   'Soccer',
+  soccer_usa_mls:                         'Soccer',
+  soccer_canada_cpl:                      'Soccer',
+  soccer_fifa_world_cup:                  'Soccer',
+  americanfootball_cfl:                   'CFL',
+  icehockey_ahl:                          'AHL',
+  mma_mixed_martial_arts:                 'UFC',
+  tennis_atp_french_open:                 'Tennis',
+  tennis_wta_french_open:                 'Tennis',
+  tennis_atp_us_open:                     'Tennis',
+  tennis_wta_us_open:                     'Tennis',
+  tennis_atp_wimbledon:                   'Tennis',
+  tennis_wta_wimbledon:                   'Tennis',
 }
 
 function transformOdds(games, sportKey, market) {
@@ -272,10 +265,10 @@ function transformOdds(games, sportKey, market) {
 
   return games
     .filter(game => {
-      // Only show live games (no commence_time = in-progress) or upcoming games
+      
       if (!game.commence_time) return true
       const gameTime = new Date(game.commence_time).getTime()
-      // Keep games that started within last 3 hours (live) or haven't started yet
+      
       return gameTime >= now - 3 * 60 * 60 * 1000
     })
     .map(game => {
@@ -323,8 +316,6 @@ function transformOdds(games, sportKey, market) {
   }).filter(g => g.markets[0].rows.length > 0)
 }
 
-// ── ARB CALCULATOR ────────────────────────────────────────────────────────
-
 function dec(american) {
   if (american >= 100)  return (american / 100) + 1
   if (american <= -100) return (100 / Math.abs(american)) + 1
@@ -336,7 +327,7 @@ function calcArbitrage(games, minProfit = 0) {
 
   for (const game of games) {
     for (const mkt of game.markets || []) {
-      // Best odds per outcome across all books
+      
       const best = {}
       for (const row of mkt.rows || []) {
         const bestNum = parseInt(row.bestOdds) || 0
@@ -387,8 +378,6 @@ function calcArbitrage(games, minProfit = 0) {
   return arbs.sort((a, b) => b.profit - a.profit)
 }
 
-// ── EV CALCULATOR ─────────────────────────────────────────────────────────
-
 function calcEV(games, minEV = 0) {
   const evBets = []
 
@@ -436,31 +425,32 @@ function calcEV(games, minEV = 0) {
   return evBets.sort((a, b) => b.ev - a.ev)
 }
 
-// ── SPORT KEY MAPPER ──────────────────────────────────────────────────────
-
 function getSportKey(label) {
   const map = {
     NFL:    'americanfootball_nfl',
+    CFL:    'americanfootball_cfl',
     NBA:    'basketball_nba',
     MLB:    'baseball_mlb',
     NHL:    'icehockey_nhl',
-    Soccer: 'soccer_epl',
+    AHL:    'icehockey_ahl',
+    Soccer: 'soccer_usa_mls',
     UFC:    'mma_mixed_martial_arts',
     Tennis: 'tennis_atp_french_open',
   }
-  return map[label] || 'americanfootball_nfl'
+  return map[label] || 'baseball_mlb'
 }
-
-// ── MOCK FALLBACKS ────────────────────────────────────────────────────────
 
 function getMockSports() {
   return [
-    { key: 'americanfootball_nfl', title: 'NFL', active: true },
-    { key: 'basketball_nba',       title: 'NBA', active: true },
-    { key: 'baseball_mlb',         title: 'MLB', active: true },
-    { key: 'icehockey_nhl',        title: 'NHL', active: true },
-    { key: 'soccer_epl',           title: 'EPL Soccer', active: true },
-    { key: 'mma_mixed_martial_arts', title: 'UFC/MMA', active: true },
+    { key: 'americanfootball_nfl',    title: 'NFL',          active: true },
+    { key: 'americanfootball_cfl',    title: 'CFL',          active: true },
+    { key: 'basketball_nba',          title: 'NBA',          active: true },
+    { key: 'baseball_mlb',            title: 'MLB',          active: true },
+    { key: 'icehockey_nhl',           title: 'NHL',          active: true },
+    { key: 'icehockey_ahl',           title: 'AHL',          active: true },
+    { key: 'soccer_usa_mls',          title: 'MLS Soccer',   active: true },
+    { key: 'soccer_canada_cpl',       title: 'CPL Soccer',   active: true },
+    { key: 'mma_mixed_martial_arts',  title: 'UFC/MMA',      active: true },
   ]
 }
 
