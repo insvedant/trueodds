@@ -1,48 +1,31 @@
-/**
- * alertScheduler.js
- * ─────────────────────────────────────────────────────────────────────────
- * Checks for hot arb/EV opportunities and emails matching subscribers.
- *
- * Thresholds:
- *  - Basic plan    : 2% arb / 3% EV  (default, not customizable)
- *  - Gold/Platinum : customizable down to 1% arb / 2% EV
- *  - HOT deal      : 5%+ always sent regardless of user threshold
- *
- * Called by:
- *  - POST /api/alerts/run-scheduler  (manual trigger from admin)
- *  - GitHub Actions cron every 30 min (via run_alerts.js script)
- *  - Auto on startup (first run after server start)
- */
+
 
 const User            = require('../models/User')
 const { getArbitrage, getPositiveEV } = require('./apiService')
 const { sendEmail }   = require('./emailService')
 const mongoose        = require('mongoose')
 
-// Re-use Alert model from alerts route
-const Alert = mongoose.models.Alert || require('../routes/alerts').Alert
+const Alert = require('../models/Alert')
 
-const HOT_THRESHOLD = 5.0   // always notify regardless of user prefs
-const MIN_THRESHOLD = 1.0   // Gold/Platinum can go this low
-const COOLDOWN_MINS = 60    // don't email same user more than once per hour
+const HOT_THRESHOLD = 5.0   
+const MIN_THRESHOLD = 1.0   
+const COOLDOWN_MINS = 60    
 
-// ── Plan thresholds ───────────────────────────────────────────────────────
 function getMinThreshold(user) {
   const prefs = user.alertPrefs || {}
   const plan  = user.plan
 
   if (plan === 'basic') {
-    // Basic users always get 2% minimum — not customizable
+    
     return { arb: 2.0, ev: 3.0 }
   }
-  // Gold/Platinum can customize down to 1%
+  
   return {
     arb: Math.max(MIN_THRESHOLD, prefs.arbThreshold ?? 2.0),
     ev:  Math.max(MIN_THRESHOLD, prefs.evThreshold  ?? 3.0),
   }
 }
 
-// ── Check if user is in cooldown ──────────────────────────────────────────
 function inCooldown(user) {
   const last = user.alertPrefs?.lastEmailedAt
   if (!last) return false
@@ -50,7 +33,6 @@ function inCooldown(user) {
   return minsAgo < COOLDOWN_MINS
 }
 
-// ── Build email HTML for arb opportunity ─────────────────────────────────
 function buildArbEmail(user, arbs, frontendUrl) {
   const topArbs = arbs.slice(0, 5)
   const rows = topArbs.map(a => `
@@ -120,7 +102,6 @@ function buildArbEmail(user, arbs, frontendUrl) {
   `
 }
 
-// ── Build email HTML for +EV opportunity ─────────────────────────────────
 function buildEVEmail(user, evBets, frontendUrl) {
   const topBets = evBets.slice(0, 5)
   const rows = topBets.map(b => `
@@ -183,13 +164,12 @@ function buildEVEmail(user, evBets, frontendUrl) {
   `
 }
 
-// ── Main scheduler function ───────────────────────────────────────────────
 async function runAlertScheduler() {
   const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca'
   console.log('[AlertScheduler] Starting run at', new Date().toISOString())
 
   try {
-    // 1. Fetch current opportunities
+    
     const [arbResult, evResult] = await Promise.allSettled([
       getArbitrage(0, null),
       getPositiveEV(0, null),
@@ -205,7 +185,7 @@ async function runAlertScheduler() {
 
     console.log(`[AlertScheduler] Found ${arbs.length} arbs, ${evBets.length} EV bets`)
 
-    // 2. Get all eligible subscribers (basic, gold, platinum with active/trial status)
+    
     const users = await User.find({
       plan:               { $in: ['basic', 'gold', 'platinum'] },
       subscriptionStatus: { $in: ['active', 'trial'] },
@@ -218,13 +198,13 @@ async function runAlertScheduler() {
 
     for (const user of users) {
       try {
-        // Skip if in cooldown
+        
         if (inCooldown(user)) { skipped++; continue }
 
         const threshold = getMinThreshold(user)
         const prefs     = user.alertPrefs || {}
 
-        // Filter arbs by user threshold + sport preference
+        
         const matchingArbs = arbs.filter(a => {
           const profit = a.profit || 0
           if (profit < threshold.arb && profit < HOT_THRESHOLD) return false
@@ -233,7 +213,7 @@ async function runAlertScheduler() {
           return true
         })
 
-        // Filter EV bets (gold/platinum only)
+        
         const matchingEV = ['gold','platinum'].includes(user.plan) ? evBets.filter(b => {
           const ev = b.ev || 0
           if (ev < threshold.ev && ev < HOT_THRESHOLD) return false
@@ -245,7 +225,7 @@ async function runAlertScheduler() {
           skipped++; continue
         }
 
-        // Build and send email
+        
         let subject, html
         if (matchingArbs.length > 0) {
           const bestProfit = Math.max(...matchingArbs.map(a => a.profit || 0))
@@ -262,7 +242,7 @@ async function runAlertScheduler() {
 
         await sendEmail({ to: user.email, subject, html })
 
-        // Save in-app alert
+        
         if (Alert) {
           const topArb = matchingArbs[0]
           await Alert.create({
@@ -279,7 +259,7 @@ async function runAlertScheduler() {
           })
         }
 
-        // Update lastEmailedAt to enforce cooldown
+        
         await User.updateOne(
           { _id: user._id },
           { 'alertPrefs.lastEmailedAt': new Date() }
