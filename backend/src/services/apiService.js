@@ -380,20 +380,37 @@ function calcArbitrage(games, minProfit = 0) {
   return arbs.sort((a, b) => b.profit - a.profit)
 }
 
+const SHARP_BOOKS = ['pinnacle', 'bet365', 'draftkings', 'fanduel', 'betmgm', 'caesars']
+
+function getFairOdds(books) {
+  for (const sharp of SHARP_BOOKS) {
+    const odds = parseInt(books?.[sharp]) || 0
+    if (odds) return { fairOdds: odds, sharpBook: sharp }
+  }
+  const allOdds = Object.values(books || {}).map(o => parseInt(o)).filter(o => o)
+  if (allOdds.length < 2) return null
+  const avgDec = allOdds.reduce((s, o) => s + dec(o), 0) / allOdds.length
+  const impliedAmerican = avgDec >= 2
+    ? Math.round((avgDec - 1) * 100)
+    : Math.round(-100 / (avgDec - 1))
+  return { fairOdds: impliedAmerican, sharpBook: 'market_avg' }
+}
+
 function calcEV(games, minEV = 0) {
   const evBets = []
 
   for (const game of games) {
     for (const mkt of game.markets || []) {
       for (const row of mkt.rows || []) {
-        const pinnacleOdds = parseInt(row.books?.['pinnacle']) || 0
-        if (!pinnacleOdds) continue
+        const fair = getFairOdds(row.books)
+        if (!fair) continue
 
-        const fairDec  = dec(pinnacleOdds)
+        const { fairOdds, sharpBook } = fair
+        const fairDec  = dec(fairOdds)
         const trueProb = 1 / fairDec
 
         for (const [bookKey, oddsStr] of Object.entries(row.books || {})) {
-          if (bookKey === 'pinnacle') continue
+          if (bookKey === sharpBook) continue
           const bookOdds = parseInt(oddsStr) || 0
           if (!bookOdds) continue
 
@@ -412,7 +429,7 @@ function calcEV(games, minEV = 0) {
             market:    `${mkt.name} — ${row.selection}`,
             ev:        Math.round(ev * 100) / 100,
             bookOdds:  bookOdds > 0 ? `+${bookOdds}` : `${bookOdds}`,
-            fairOdds:  pinnacleOdds > 0 ? `+${pinnacleOdds}` : `${pinnacleOdds}`,
+            fairOdds:  fairOdds > 0 ? `+${fairOdds}` : `${fairOdds}`,
             book:      bookKey,
             prob:      `${(trueProb * 100).toFixed(1)}%`,
             kelly:     Math.round(kelly * 10) / 10,
