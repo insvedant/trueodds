@@ -117,8 +117,11 @@ async function getOdds(sport = 'americanfootball_nfl', market = 'h2h') {
 
   const raw  = await fetchJSON(url)
   const data = transformOdds(raw, sport, market)
-  await Cache.set(key, data, TTL.ODDS, 'api')
-  return { data, source: 'api' }
+  // Only cache if we got actual data — don't cache empty results
+  if (data && data.length > 0) {
+    await Cache.set(key, data, TTL.ODDS, 'api')
+  }
+  return { data: data || [], source: 'api' }
 }
 
 async function getAllOdds() {
@@ -141,8 +144,10 @@ async function getAllOdds() {
 
   if (combined.length > 0) {
     await Cache.set(key, combined, TTL.ODDS, 'api')
+    return { data: combined, source: 'api' }
   }
-  return { data: combined, source: combined.length > 0 ? 'api' : 'empty' }
+  // Don't cache empty — try again next time
+  return { data: [], source: 'empty' }
 }
 
 async function getArbitrage(minProfit = 0, sport = null) {
