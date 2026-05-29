@@ -109,10 +109,9 @@ async function getOdds(sport = 'americanfootball_nfl', market = 'h2h') {
   const url = [
     `${ODDS_BASE}/sports/${sport}/odds`,
     `?apiKey=${ODDS_API_KEY}`,
-    `&regions=us,us2,uk,au,ca`,
+    `&regions=us,us2,uk,eu,au,ca`,
     `&markets=${market}`,
     `&oddsFormat=american`,
-    `&bookmakers=${ALL_BOOKS.join(',')}`,
   ].join('')
 
   const raw  = await fetchJSON(url)
@@ -432,6 +431,7 @@ function calcEV(games, minEV = 0) {
             id:        `${game.id}_${bookKey}_${row.selection}`,
             game:      game.game,
             sport:     game.sport,
+            league:    game.league || '',
             market:    `${mkt.name} — ${row.selection}`,
             ev:        Math.round(ev * 100) / 100,
             bookOdds:  bookOdds > 0 ? `+${bookOdds}` : `${bookOdds}`,
