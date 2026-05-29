@@ -9,7 +9,7 @@ const {
 
 router.get('/odds', optionalAuth, async (req, res) => {
   try {
-    const { sport = 'NFL', market = 'h2h' } = req.query
+    const { sport = 'All', market = 'h2h' } = req.query
 
     const { data: allData, source } = (sport === 'All' || sport === 'Soccer')
       ? await getAllOdds()
