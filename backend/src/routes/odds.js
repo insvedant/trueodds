@@ -111,4 +111,14 @@ router.get('/quota', protect, (req, res) => {
   res.json({ success: true, quota: getQuotaInfo() })
 })
 
+router.post('/refresh', protect, async (req, res) => {
+  try {
+    const Cache = require('../models/Cache')
+    await Cache.deleteMany({ key: { $regex: /^(odds:|arb:|ev:)/ } })
+    res.json({ success: true, message: 'Cache cleared. Next fetch will pull fresh data from TheOddsAPI.' })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
+  }
+})
+
 module.exports = router
