@@ -154,12 +154,38 @@ async function getArbitrage(minProfit = 0, sport = null) {
   const cached = await Cache.get(key)
   if (cached) return { data: cached, source: 'cache' }
 
-  const { data: odds, source } = sport
-    ? await getOdds(getSportKey(sport), 'h2h')
-    : await getAllOdds()
+  let odds = []
+  let source = 'api'
+
+  if (sport) {
+    const sportKey = getSportKey(sport)
+    // For hockey and football fetch both h2h and spreads for more arb opportunities
+    const markets = ['NHL','CFL','NFL'].includes(sport) ? ['h2h','spreads'] : ['h2h']
+    const results = await Promise.allSettled(markets.map(m => getOdds(sportKey, m)))
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.data?.length) {
+        // Merge markets from same games
+        for (const game of r.value.data) {
+          const existing = odds.find(g => g.id === game.id)
+          if (existing) {
+            existing.markets.push(...game.markets)
+          } else {
+            odds.push(game)
+          }
+        }
+        source = r.value.source
+      }
+    }
+  } else {
+    const result = await getAllOdds()
+    odds = result.data
+    source = result.source
+  }
 
   const arbs = calcArbitrage(odds, minProfit)
-  await Cache.set(key, arbs, TTL.ODDS, source)
+  if (arbs.length > 0) {
+    await Cache.set(key, arbs, TTL.ODDS, source)
+  }
   return { data: arbs, source }
 }
 
