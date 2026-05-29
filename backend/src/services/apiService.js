@@ -274,11 +274,10 @@ function transformOdds(games, sportKey, market) {
 
   return games
     .filter(game => {
-      
       if (!game.commence_time) return true
       const gameTime = new Date(game.commence_time).getTime()
-      
-      return gameTime >= now - 3 * 60 * 60 * 1000
+      // Show games up to 7 days in the past (completed/recent) and 30 days future
+      return gameTime >= now - 7 * 24 * 60 * 60 * 1000
     })
     .map(game => {
     const allBooks = {}
