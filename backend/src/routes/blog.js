@@ -1,7 +1,34 @@
 const express   = require('express')
 const router    = express.Router()
+const multer    = require('multer')
+const path      = require('path')
+const fs        = require('fs')
 const BlogPost  = require('../models/BlogPost')
 const { protect, adminOnly } = require('../middleware/auth')
+
+// Multer setup — store uploads in /uploads/blog/
+const uploadDir = path.join(__dirname, '../../uploads/blog')
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true })
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename:    (req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g,'_')}`),
+})
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const ok = /jpeg|jpg|png|gif|webp/.test(file.mimetype)
+    cb(ok ? null : new Error('Images only'), ok)
+  },
+})
+
+// IMAGE UPLOAD
+router.post('/upload-image', protect, adminOnly, upload.single('image'), (req, res) => {
+  if (!req.file) return res.status(400).json({ success: false, message: 'No image uploaded' })
+  const url = `${process.env.BACKEND_URL || 'https://trueodds.onrender.com'}/uploads/blog/${req.file.filename}`
+  res.json({ success: true, url })
+})
 
 // Seed default posts if none exist
 const DEFAULT_POSTS = [
