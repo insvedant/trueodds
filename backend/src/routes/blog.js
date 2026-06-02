@@ -1,7 +1,7 @@
 const express   = require('express')
 const router    = express.Router()
 const BlogPost  = require('../models/BlogPost')
-const { protect, requireRole } = require('../middleware/auth')
+const { protect, adminOnly } = require('../middleware/auth')
 
 // Seed default posts if none exist
 const DEFAULT_POSTS = [
@@ -238,7 +238,7 @@ router.get('/', async (req, res) => {
 })
 
 // ADMIN — get all posts (including drafts) — MUST be before /:slug
-router.get('/admin/all', protect, requireRole('admin'), async (req, res) => {
+router.get('/admin/all', protect, adminOnly, async (req, res) => {
   try {
     const posts = await BlogPost.find().sort({ createdAt: -1 })
     res.json({ success: true, data: posts })
@@ -255,7 +255,7 @@ router.get('/:slug', async (req, res) => {
 })
 
 // ADMIN — create post
-router.post('/', protect, requireRole('admin'), async (req, res) => {
+router.post('/', protect, adminOnly, async (req, res) => {
   try {
     const { title, slug, excerpt, content, category, emoji, tags, status, readTime, author } = req.body
     const post = await BlogPost.create({ title, slug: slug || title.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''), excerpt, content, category, emoji, tags, status, readTime, author })
@@ -264,7 +264,7 @@ router.post('/', protect, requireRole('admin'), async (req, res) => {
 })
 
 // ADMIN — update post
-router.put('/:id', protect, requireRole('admin'), async (req, res) => {
+router.put('/:id', protect, adminOnly, async (req, res) => {
   try {
     const post = await BlogPost.findByIdAndUpdate(req.params.id, req.body, { new: true })
     if (!post) return res.status(404).json({ success: false, message: 'Not found' })
@@ -273,7 +273,7 @@ router.put('/:id', protect, requireRole('admin'), async (req, res) => {
 })
 
 // ADMIN — delete post
-router.delete('/:id', protect, requireRole('admin'), async (req, res) => {
+router.delete('/:id', protect, adminOnly, async (req, res) => {
   try {
     await BlogPost.findByIdAndDelete(req.params.id)
     res.json({ success: true })
