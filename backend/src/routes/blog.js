@@ -237,20 +237,20 @@ router.get('/', async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }) }
 })
 
+// ADMIN — get all posts (including drafts) — MUST be before /:slug
+router.get('/admin/all', protect, requireRole('admin'), async (req, res) => {
+  try {
+    const posts = await BlogPost.find().sort({ createdAt: -1 })
+    res.json({ success: true, data: posts })
+  } catch (err) { res.status(500).json({ success: false, message: err.message }) }
+})
+
 // PUBLIC — get single post by slug
 router.get('/:slug', async (req, res) => {
   try {
     const post = await BlogPost.findOne({ slug: req.params.slug, status: 'published' })
     if (!post) return res.status(404).json({ success: false, message: 'Post not found' })
     res.json({ success: true, data: post })
-  } catch (err) { res.status(500).json({ success: false, message: err.message }) }
-})
-
-// ADMIN — get all posts (including drafts)
-router.get('/admin/all', protect, requireRole('admin'), async (req, res) => {
-  try {
-    const posts = await BlogPost.find().sort({ createdAt: -1 })
-    res.json({ success: true, data: posts })
   } catch (err) { res.status(500).json({ success: false, message: err.message }) }
 })
 
