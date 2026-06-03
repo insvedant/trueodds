@@ -86,13 +86,13 @@ function buildEmailHtml({ subject, body, userName }) {
         </td></tr>
         <!-- CTA -->
         <tr><td style="background:#111520;padding:0 32px 32px;border:1px solid rgba(255,255,255,0.06);border-top:none;">
-          <a href="https://trueodds.ca/dashboard" style="display:inline-block;background:#00C853;color:#000;font-weight:800;font-size:14px;padding:12px 28px;border-radius:10px;text-decoration:none;">Open Dashboard →</a>
+          <a href="${process.env.FRONTEND_URL || 'https://trueodds.ca'}/dashboard" style="display:inline-block;background:#00C853;color:#000;font-weight:800;font-size:14px;padding:12px 28px;border-radius:10px;text-decoration:none;">Open Dashboard →</a>
         </td></tr>
         <!-- Footer -->
         <tr><td style="background:#0a0d15;border-radius:0 0 16px 16px;padding:20px 32px;border:1px solid rgba(255,255,255,0.06);border-top:none;">
           <p style="margin:0;font-size:12px;color:#4b5563;line-height:1.6;">
             You received this because you have a TrueOdds account.<br/>
-            © 2026 TrueOdds · <a href="https://trueodds.ca" style="color:#6b7280;">trueodds.ca</a>
+            © 2026 TrueOdds · <a href="${process.env.FRONTEND_URL || 'https://trueodds.ca'}" style="color:#6b7280;">${(process.env.FRONTEND_URL || 'https://trueodds.ca').replace('https://','')}</a>
           </p>
         </td></tr>
       </table>
