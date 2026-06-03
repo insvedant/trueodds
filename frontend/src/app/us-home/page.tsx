@@ -248,7 +248,7 @@ export default function USHomePage() {
             {[
               { title:'Tools', links:[['Arbitrage Finder','/signup'],['+ EV Betting','/signup'],['Bet Tracker','/signup'],['Hedge Calculator','/signup']] },
               { title:'Company', links:[['About','/about'],['Pricing','/pricing'],['Blog','/blog'],['Contact','/contact']] },
-              { title:'Legal', links:[['Privacy Policy','/privacy'],['Terms of Service','/terms'],['Responsible Gaming','/responsible'],['US Regulations','/dashboard/regulatory']] },
+              { title:'Legal', links:[['Privacy Policy','/privacy'],['Terms of Service','/terms'],['Responsible Gaming','/responsible-gaming'],['US Regulations','/dashboard/regulatory']] },
             ].map(col=>(
               <div key={col.title}>
                 <div style={{ fontSize:12, fontWeight:700, color:'#e6edf3', marginBottom:14, textTransform:'uppercase', letterSpacing:'1px' }}>{col.title}</div>
