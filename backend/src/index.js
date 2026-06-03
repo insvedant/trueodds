@@ -20,6 +20,7 @@ function getAllowedOrigins() {
   }
   
   base.push('https://trueodds.ca', 'https://www.trueodds.ca')
+  base.push('https://trueodds.us', 'https://www.trueodds.us')
   return base
 }
 
