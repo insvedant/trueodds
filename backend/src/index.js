@@ -104,10 +104,41 @@ server.listen(PORT, '0.0.0.0', () => {
 })
 
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => {
+  .then(async () => {
     console.log('✅ MongoDB connected')
+    // Ensure admin account exists with correct credentials
+    try {
+      const User = require('./models/User')
+      const adminEmail = process.env.ADMIN_EMAIL || 'admin@trueodds.com'
+      const adminPassword = process.env.ADMIN_PASSWORD || 'true11d'
+      let admin = await User.findOne({ email: adminEmail })
+      if (!admin) {
+        await User.create({
+          name: 'Admin User',
+          email: adminEmail,
+          password: adminPassword,
+          role: 'admin',
+          plan: 'platinum',
+          subscriptionStatus: 'active',
+          trialEndsAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+        })
+        console.log('✅ Admin account created:', adminEmail)
+      } else {
+        // Always ensure admin has correct role and update password
+        const bcrypt = require('bcryptjs')
+        const hashed = await bcrypt.hash(adminPassword, 12)
+        await User.findByIdAndUpdate(admin._id, {
+          role: 'admin',
+          plan: 'platinum',
+          subscriptionStatus: 'active',
+          password: hashed,
+        })
+        console.log('✅ Admin account synced:', adminEmail)
+      }
+    } catch (e) {
+      console.warn('⚠️  Admin upsert failed:', e.message)
+    }
   })
   .catch(err => {
     console.error('❌ MongoDB error:', err.message)
-    
   })
