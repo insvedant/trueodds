@@ -57,6 +57,7 @@ app.get('/health', (req, res) => res.json({
 
 app.use('/api/auth',          require('./routes/auth'))
 app.use('/api/subscriptions', require('./routes/subscriptions'))
+app.use('/api/cron', require('./routes/discordAlerts'))
 app.use('/api/hedge',         require('./routes/hedge'))
 app.use('/api/referral',      require('./routes/referral'))
 app.use('/api/chat',          require('./routes/chat'))
