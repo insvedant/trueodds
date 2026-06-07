@@ -65,16 +65,16 @@ const SPORT_EMOJI = {
 // Plat  gets ALL alerts >= 0.5% arb, >= 1.5% EV
 function getArbTiers(profit) {
   const t = []
-  if (profit >= 0.5) t.push('platinum')
-  if (profit >= 1.5) t.push('gold')
-  if (profit >= 1.0) t.push('basic')
+  if (profit >= 1.0) t.push('platinum')  // platinum gets everything ≥ 1%
+  if (profit >= 2.5) t.push('gold')       // gold gets solid arbs ≥ 2.5%
+  if (profit >= 4.0) t.push('basic')      // basic gets only rare hot arbs ≥ 4%
   return [...new Set(t)]
 }
 function getEVTiers(ev) {
   const t = []
-  if (ev >= 1.5) t.push('platinum')
-  if (ev >= 2.5) t.push('gold')
-  if (ev >= 2.0) t.push('basic')
+  if (ev >= 1.5) t.push('platinum')  // platinum gets everything ≥ 1.5%
+  if (ev >= 3.0) t.push('gold')       // gold gets ≥ 3%
+  if (ev >= 5.0) t.push('basic')      // basic gets only strong EV ≥ 5%
   return [...new Set(t)]
 }
 
