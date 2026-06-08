@@ -1,13 +1,4 @@
-/**
- * auth.js — Authentication routes
- *
- * POST /api/auth/register          — register with name, email, phone, password
- * POST /api/auth/login             — login
- * GET  /api/auth/me                — get current user
- * PUT  /api/auth/profile           — update profile (name, phone, password)
- * POST /api/auth/forgot-password   — send reset email via Gmail
- * POST /api/auth/reset-password    — reset password with token from email
- */
+
 
 const router  = require('express').Router()
 const jwt     = require('jsonwebtoken')
@@ -15,23 +6,23 @@ const crypto  = require('crypto')
 const User    = require('../models/User')
 const { protect }  = require('../middleware/auth')
 const { sendPasswordResetEmail, sendWelcomeEmail } = require('../services/emailService')
+const { logActivity } = require('../services/logActivity')
 
 const sign = (id) => jwt.sign({ id }, process.env.JWT_SECRET, {
   expiresIn: process.env.JWT_EXPIRES_IN || '30d',
 })
 
-// ── POST /api/auth/register ───────────────────────────────────────────────
 router.post('/register', async (req, res) => {
   try {
     const { name, email, phone, password, referralCode } = req.body
 
-    // Validation
+    
     if (!name?.trim())     return res.status(400).json({ success: false, message: 'Name is required.' })
     if (!email?.trim())    return res.status(400).json({ success: false, message: 'Email is required.' })
     if (!password)         return res.status(400).json({ success: false, message: 'Password is required.' })
     if (password.length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' })
 
-    // Phone validation (optional but validated if provided)
+    
     if (phone) {
       const cleaned = phone.replace(/[\s\-\(\)]/g, '')
       if (!/^\+?[0-9]{7,15}$/.test(cleaned)) {
@@ -39,19 +30,19 @@ router.post('/register', async (req, res) => {
       }
     }
 
-    // Check duplicate email
+    
     if (await User.findOne({ email: email.toLowerCase() })) {
       return res.status(400).json({ success: false, message: 'An account with this email already exists.' })
     }
 
-    // Resolve referrer (if referral code provided)
+    
     let referrerId = null
     if (referralCode) {
       const referrer = await User.findOne({ referralCode: referralCode.toUpperCase() })
       if (referrer) referrerId = referrer._id
     }
 
-    // Create user (password is hashed by pre-save hook)
+    
     const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)
     const user = await User.create({
       name:               name.trim(),
@@ -63,10 +54,12 @@ router.post('/register', async (req, res) => {
       referredBy:         referrerId,
     })
 
-    // Send welcome email (non-blocking — don't fail registration if email fails)
+    
     sendWelcomeEmail(user.email, user.name, user.plan).catch(err =>
       console.warn('[Email] Welcome email failed:', err.message)
     )
+
+    logActivity({ type:'signup', user, ip: req.ip, message:`New signup: ${user.email}`, meta:{ plan: user.plan, referral: referralCode||null } })
 
     res.status(201).json({
       success: true,
@@ -79,7 +72,6 @@ router.post('/register', async (req, res) => {
   }
 })
 
-// ── POST /api/auth/login ──────────────────────────────────────────────────
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body
@@ -89,6 +81,7 @@ router.post('/login', async (req, res) => {
 
     const user = await User.findOne({ email: email.toLowerCase() }).select('+password')
     if (!user || !(await user.comparePassword(password))) {
+      logActivity({ type:'login_failed', email: email.toLowerCase(), ip: req.ip, status:'failed', message:`Failed login attempt for ${email}`, meta:{ reason: !user ? 'user_not_found' : 'wrong_password' } })
       return res.status(401).json({ success: false, message: 'Invalid email or password.' })
     }
 
@@ -100,18 +93,18 @@ router.post('/login', async (req, res) => {
     user.loginCount += 1
     await user.save({ validateBeforeSave: false })
 
+    logActivity({ type: user.role === 'admin' ? 'admin_login' : 'login', user, ip: req.ip, message:`${user.role === 'admin' ? 'Admin' : 'User'} logged in`, meta:{ loginCount: user.loginCount } })
+
     res.json({ success: true, token: sign(user._id), user: user.toPublicJSON() })
   } catch (e) {
     res.status(500).json({ success: false, message: e.message })
   }
 })
 
-// ── GET /api/auth/me ──────────────────────────────────────────────────────
 router.get('/me', protect, (req, res) => {
   res.json({ success: true, user: req.user.toPublicJSON() })
 })
 
-// ── PUT /api/auth/profile ─────────────────────────────────────────────────
 router.put('/profile', protect, async (req, res) => {
   try {
     const { name, phone, password, currentPassword } = req.body
@@ -119,7 +112,7 @@ router.put('/profile', protect, async (req, res) => {
     if (name)  req.user.name  = name.trim()
     if (phone) req.user.phone = phone.trim()
 
-    // Password change requires current password verification
+    
     if (password) {
       if (!currentPassword) {
         return res.status(400).json({ success: false, message: 'Current password required to set new password.' })
@@ -135,14 +128,15 @@ router.put('/profile', protect, async (req, res) => {
     }
 
     await req.user.save()
+    if (password) {
+      logActivity({ type:'password_changed', user: req.user, ip: req.ip, message:`Password changed by ${req.user.email}` })
+    }
     res.json({ success: true, user: req.user.toPublicJSON() })
   } catch (e) {
     res.status(500).json({ success: false, message: e.message })
   }
 })
 
-// ── POST /api/auth/change-email ───────────────────────────────────────────
-// Requires current password to confirm identity before changing email
 router.post('/change-email', protect, async (req, res) => {
   try {
     const { newEmail, currentPassword } = req.body
@@ -151,13 +145,13 @@ router.post('/change-email', protect, async (req, res) => {
     if (!currentPassword)     return res.status(400).json({ success: false, message: 'Current password is required.' })
     if (!newEmail.includes('@')) return res.status(400).json({ success: false, message: 'Invalid email address.' })
 
-    // Verify password
+    
     const userWithPw = await User.findById(req.user._id).select('+password')
     if (!(await userWithPw.comparePassword(currentPassword))) {
       return res.status(401).json({ success: false, message: 'Incorrect password.' })
     }
 
-    // Check email not already taken
+    
     const existing = await User.findOne({ email: newEmail.toLowerCase().trim() })
     if (existing && existing._id.toString() !== req.user._id.toString()) {
       return res.status(400).json({ success: false, message: 'That email is already in use.' })
@@ -166,14 +160,13 @@ router.post('/change-email', protect, async (req, res) => {
     req.user.email = newEmail.toLowerCase().trim()
     await req.user.save({ validateBeforeSave: false })
 
+    logActivity({ type:'email_changed', user: req.user, ip: req.ip, message:`Email changed to ${newEmail}`, meta:{ newEmail, role: req.user.role } })
     res.json({ success: true, message: 'Email updated successfully.', user: req.user.toPublicJSON() })
   } catch (e) {
     res.status(500).json({ success: false, message: e.message })
   }
 })
 
-// ── POST /api/auth/forgot-password ───────────────────────────────────────
-// Sends a password reset link to the user's Gmail
 router.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body
@@ -181,7 +174,7 @@ router.post('/forgot-password', async (req, res) => {
 
     const user = await User.findOne({ email: email.toLowerCase() })
 
-    // Always return success even if email not found (security: don't reveal if email exists)
+    
     if (!user) {
       return res.json({
         success: true,
@@ -189,19 +182,20 @@ router.post('/forgot-password', async (req, res) => {
       })
     }
 
-    // Generate reset token — raw token goes in email, hashed stored in DB
+    
     const rawToken = user.createPasswordResetToken()
     await user.save({ validateBeforeSave: false })
 
-    // Send reset email
+    
     try {
       await sendPasswordResetEmail(user.email, user.name, rawToken)
+      logActivity({ type:'password_reset_requested', user, ip: req.ip, message:`Password reset requested for ${user.email}` })
       res.json({
         success: true,
         message: 'Password reset link sent to your email. Check your inbox (and spam folder).',
       })
     } catch (emailErr) {
-      // Roll back token if email failed
+      
       user.passwordResetToken   = undefined
       user.passwordResetExpires = undefined
       await user.save({ validateBeforeSave: false })
@@ -213,8 +207,6 @@ router.post('/forgot-password', async (req, res) => {
   }
 })
 
-// ── POST /api/auth/reset-password ────────────────────────────────────────
-// Validates the token from email and sets new password
 router.post('/reset-password', async (req, res) => {
   try {
     const { token, password } = req.body
@@ -223,13 +215,13 @@ router.post('/reset-password', async (req, res) => {
     if (!password) return res.status(400).json({ success: false, message: 'New password is required.' })
     if (password.length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' })
 
-    // Hash the raw token from the URL to compare with DB
+    
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex')
 
-    // Find user with matching non-expired token
+    
     const user = await User.findOne({
       passwordResetToken:   hashedToken,
-      passwordResetExpires: { $gt: new Date() }, // not expired
+      passwordResetExpires: { $gt: new Date() }, 
     }).select('+passwordResetToken +passwordResetExpires')
 
     if (!user) {
@@ -239,12 +231,13 @@ router.post('/reset-password', async (req, res) => {
       })
     }
 
-    // Set new password (pre-save hook will hash it)
+    
     user.password             = password
     user.passwordResetToken   = undefined
     user.passwordResetExpires = undefined
     await user.save()
 
+    logActivity({ type:'password_reset_completed', user, ip: req.ip, message:`Password reset completed for ${user.email}` })
     res.json({
       success: true,
       message: 'Password reset successfully. You can now log in with your new password.',
