@@ -37,6 +37,10 @@ const userSchema = new mongoose.Schema({
     hotDealsOnly:  { type: Boolean, default: false },
     lastEmailedAt: { type: Date,    default: null },
   },
+  // Discord integration
+  discordId:       { type: String, default: null, sparse: true },
+  discordUsername: { type: String, default: null },
+
   isActive:   { type: Boolean, default: true },
   lastLogin:  Date,
   loginCount: { type: Number, default: 0 },
@@ -77,6 +81,8 @@ userSchema.methods.toPublicJSON = function() {
     referralCount:      this.referralCount,
     referralRewards:    this.referralRewards,
     alertPrefs:         this.alertPrefs,
+    discordId:          this.discordId,
+    discordUsername:    this.discordUsername,
     createdAt:          this.createdAt,
   }
 }
