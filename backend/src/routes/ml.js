@@ -95,49 +95,71 @@ router.get('/predictions/:eventId', protect, async (req, res) => {
 router.get('/sharp-money', protect, requirePlan('gold', 'platinum'), async (req, res) => {
   try {
     const data = await mlFetch('/sharp-money')
-
-    // If ML service returned real events, use them
     if (!data.offline && data.count > 0) {
       return res.json({ success: true, ...data })
     }
 
-    // Fallback: derive line movement signals from live odds comparison
+    // Fallback: derive line movement signals from live odds
     const apiService = require('../services/apiService')
     const { data: allOdds } = await apiService.getAllOdds().catch(() => ({ data: [] }))
     const events = []
-    for (const game of (allOdds || []).slice(0, 20)) {
+
+    for (const game of (allOdds || []).slice(0, 30)) {
       const mkt  = (game.markets || [])[0]
       const rows = mkt?.rows || []
       if (rows.length < 2) continue
-      // Find the outcome with biggest spread between best and avg odds = line movement signal
+
       for (const row of rows) {
-        const best = parseFloat(String(row.bestOdds || '0').replace('+',''))
-        const avg  = parseFloat(String(row.avgOdds  || '0').replace('+',''))
+        const best = parseInt(String(row.bestOdds || '0').replace('+',''))
+        const avg  = parseInt(String(row.avgOdds  || '0').replace('+',''))
         if (!best || !avg) continue
-        const spread = Math.abs(best - avg)
-        if (spread < 5) continue  // < 5 point spread — not significant
+
+        // Convert to implied prob to find real spread
+        const toProb = o => o > 0 ? 100/(o+100) : Math.abs(o)/(Math.abs(o)+100)
+        const probDiff = Math.abs(toProb(best) - toProb(avg))
+        if (probDiff < 0.02) continue  // < 2% prob shift — skip
+
         const direction = best > avg ? 'up' : 'down'
-        const probability = Math.min(0.92, 0.60 + spread / 200)
+        // Estimate where line is heading: project movement beyond best
+        const movement   = best - avg
+        const projected  = best + Math.round(movement * 0.6)
+        const projStr    = projected > 0 ? `+${projected}` : String(projected)
+        const currentStr = best > 0 ? `+${best}` : String(best)
+
+        // Accuracy based on book count (more books = sharper signal)
+        const bookCount = Object.keys(row.books || {}).length
+        const accuracy  = Math.min(78, 52 + bookCount * 4)
+
+        // Urgency based on magnitude of movement
+        const urgencyMinutes = probDiff > 0.06 ? 15 : probDiff > 0.04 ? 30 : 60
+
         events.push({
-          event_id: game.id || game.game,
+          event_id: `${game.id}_${row.selection}`,
           sport:    game.sport || '',
-          home:     game.homeTeam || '',
-          away:     game.awayTeam || '',
+          game:     game.game  || '',
+          home:     game.game?.split(' vs ')[0] || '',
+          away:     game.game?.split(' vs ')[1] || '',
+          market:   mkt?.name || 'Moneyline',
+          selection: row.selection,
           generated_at: new Date().toISOString(),
           sharp_money: {
             available:       true,
             is_sharp:        true,
-            probability:     parseFloat(probability.toFixed(3)),
-            signal_strength: spread > 20 ? 'strong' : 'moderate',
+            probability:     parseFloat((0.52 + probDiff * 8).toFixed(3)),
+            signal_strength: probDiff > 0.06 ? 'strong' : probDiff > 0.04 ? 'moderate' : 'weak',
             direction,
-            from_line: avg  > 0 ? `+${Math.round(avg)}`  : String(Math.round(avg)),
-            to_line:   best > 0 ? `+${Math.round(best)}` : String(Math.round(best)),
+            from_line:      currentStr,
+            to_line:        projStr,
+            accuracy,
+            urgency_minutes: urgencyMinutes,
           },
         })
       }
     }
+
     events.sort((a, b) => b.sharp_money.probability - a.sharp_money.probability)
-    res.json({ success: true, count: events.slice(0,10).length, events: events.slice(0,10), source: 'live_fallback' })
+    const top = events.slice(0, 10)
+    res.json({ success: true, count: top.length, events: top, source: 'live_fallback' })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
   }
@@ -146,13 +168,11 @@ router.get('/sharp-money', protect, requirePlan('gold', 'platinum'), async (req,
 router.get('/arb-windows', protect, async (req, res) => {
   try {
     const data = await mlFetch('/arb-windows')
-
-    // If ML service returned real arbs, use them
     if (!data.offline && data.count > 0) {
       return res.json({ success: true, ...data })
     }
 
-    // Fallback: use live arbitrage data from apiService
+    // Fallback: use live arbitrage data
     const apiService = require('../services/apiService')
     const { data: allArbs } = await apiService.getArbitrage(0.5, null).catch(() => ({ data: [] }))
     const arbs = (allArbs || []).slice(0, 10).map((a, i) => {
@@ -163,19 +183,19 @@ router.get('/arb-windows', protect, async (req, res) => {
       const legs    = a.legs || []
       const books   = legs.map(l => (l.book || '').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()))
       return {
-        event_id:    a.id || a.game || String(i),
+        event_id:    a.id || String(i),
+        game:        a.game || '',
         sport:       (a.sport||'').replace(/.*_/,'').toUpperCase(),
-        home:        a.home || '',
-        away:        a.away || '',
         market:      a.market || 'Moneyline',
         profit_pct:  profit,
         legs,
+        books:       books.slice(0,2),
         probability: probMap[urgency],
         expectedIn:  timeMap[urgency],
         prepTip:     books.length >= 2
           ? `Have accounts funded at ${books.slice(0,2).join(' & ')}. Place both legs simultaneously.`
           : 'Prepare accounts at both books. Act within 60s of spotting the window.',
-        window:      { urgency, available: true },
+        window: { urgency, available: true },
       }
     })
     res.json({ success: true, count: arbs.length, arbs, source: 'live_fallback' })
