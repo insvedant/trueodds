@@ -2,10 +2,8 @@ name: ML Pipeline
 
 on:
   schedule:
-    # Collect data every 5 minutes
-    - cron: '*/5 * * * *'
-    # Retrain models every 24 hours at 2am UTC
-    - cron: '0 2 * * *'
+    - cron: '*/30 * * * *'   # collect every 30 min
+    - cron: '0 2 * * *'      # retrain daily at 2am UTC
   workflow_dispatch:
     inputs:
       job:
@@ -22,94 +20,76 @@ on:
 jobs:
   collect:
     name: Collect Odds Snapshot
-    if: |
-      (github.event_name == 'schedule' && github.event.schedule == '*/5 * * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.job == 'collect' || inputs.job == 'both'))
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '*/30 * * * *') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'collect' || github.event.inputs.job == 'both'))
     runs-on: ubuntu-latest
-    timeout-minutes: 4
-
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: ml/requirements.txt
-
       - name: Install dependencies
         run: pip install -r ml/requirements.txt
-
-      - name: Run one collection snapshot
+      - name: Run collection snapshot
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
           PYTHONPATH: ${{ github.workspace }}
-        run: |
-          python -c "
-import asyncio, sys
-sys.path.insert(0, '.')
-from ml.collect_data import collect_snapshot, setup_indexes, get_db
-db = get_db()
-setup_indexes(db)
-result = asyncio.run(collect_snapshot())
-print('Snapshots collected:', result)
-"
+        run: python ml/run_collect.py
+      - name: Report completion
+        if: always()
+        run: echo "Collection completed at $(date -u)"
 
   train:
     name: Retrain ML Models
-    if: |
+    if: >-
       (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.job == 'train' || inputs.job == 'both'))
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'train' || github.event.inputs.job == 'both'))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: ml/requirements.txt
-
       - name: Install dependencies
         run: pip install -r ml/requirements.txt
-
       - name: Train ML models
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
           PYTHONPATH: ${{ github.workspace }}
+          CI_TRAINING: 'true'
         run: python -m ml.models.train
-
-      - name: Report training results
+      - name: Report results
         if: always()
-        run: echo "Training job completed at $(date -u)"
+        run: echo "Training completed at $(date -u)"
 
   historical:
-    name: Import Historical Data
-    if: |
-      github.event_name == 'workflow_dispatch' && inputs.job == 'historical'
+    name: Import Historical Data (90 days)
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'historical'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: ml/requirements.txt
-
       - name: Install dependencies
         run: pip install -r ml/requirements.txt
-
-      - name: Run historical import (90 days)
+      - name: Run historical import
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
@@ -122,7 +102,21 @@ from ml.import_historical import import_all_sports
 result = import_all_sports()
 print('Historical import result:', result)
 "
-
-      - name: Report import results
+      - name: Report results
         if: always()
         run: echo "Historical import completed at $(date -u)"
+
+  keepalive:
+    name: Keep Workflow Active
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep workflow active
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow enable main.yml 2>/dev/null || true
+          echo "Keepalive ping at $(date -u)"
