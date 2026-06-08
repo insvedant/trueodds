@@ -94,14 +94,7 @@ jobs:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
           PYTHONPATH: ${{ github.workspace }}
-        run: |
-          python -c "
-import sys
-sys.path.insert(0, '.')
-from ml.import_historical import import_all_sports
-result = import_all_sports()
-print('Historical import result:', result)
-"
+        run: python -m ml.import_historical
       - name: Report results
         if: always()
         run: echo "Historical import completed at $(date -u)"
