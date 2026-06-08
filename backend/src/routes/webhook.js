@@ -1,6 +1,7 @@
 const router = require('express').Router()
 const User = require('../models/User')
 const { constructWebhookEvent } = require('../services/stripeService')
+const { syncRoles } = require('../services/discordService')
 
 const REFERRAL_THRESHOLD = 50
 
@@ -45,6 +46,13 @@ router.post('/stripe', require('express').raw({ type: 'application/json' }), asy
         })
         await user.save({ validateBeforeSave: false })
 
+        // Sync Discord roles to reflect active subscription
+        if (user.discordId) {
+          syncRoles(user.discordId, user.plan, 'active').catch(e =>
+            console.warn('[Discord] role sync failed after payment:', e.message)
+          )
+        }
+
         if (user.referredBy && prevTotalPaid < REFERRAL_THRESHOLD && user.totalPaid >= REFERRAL_THRESHOLD) {
           const referrer = await User.findById(user.referredBy)
           if (referrer) {
@@ -77,6 +85,12 @@ router.post('/stripe', require('express').raw({ type: 'application/json' }), asy
           user.subscriptionStatus = 'cancelled'
           user.plan = 'free'
           await user.save({ validateBeforeSave: false })
+          // Remove all plan roles on cancellation
+          if (user.discordId) {
+            syncRoles(user.discordId, 'free', 'cancelled').catch(e =>
+              console.warn('[Discord] role removal failed after cancel:', e.message)
+            )
+          }
         }
         break
       }
@@ -85,11 +99,17 @@ router.post('/stripe', require('express').raw({ type: 'application/json' }), asy
         const sub = event.data.object
         const user = await User.findOne({ stripeSubscriptionId: sub.id })
         if (user) {
-          if (sub.status === 'active') user.subscriptionStatus = 'active'
+          if (sub.status === 'active')   user.subscriptionStatus = 'active'
           if (sub.status === 'trialing') user.subscriptionStatus = 'trial'
           if (sub.status === 'past_due') user.subscriptionStatus = 'past_due'
           if (sub.trial_end) user.trialEndsAt = new Date(sub.trial_end * 1000)
           await user.save({ validateBeforeSave: false })
+          // Re-sync roles whenever the subscription state changes
+          if (user.discordId) {
+            syncRoles(user.discordId, user.plan, user.subscriptionStatus).catch(e =>
+              console.warn('[Discord] role sync failed on sub update:', e.message)
+            )
+          }
         }
         break
       }
