@@ -2,6 +2,7 @@ const router = require('express').Router()
 const User = require('../models/User')
 const { constructWebhookEvent } = require('../services/stripeService')
 const { syncRoles } = require('../services/discordService')
+const { logActivity } = require('../services/logActivity')
 
 const REFERRAL_THRESHOLD = 50
 
@@ -46,6 +47,8 @@ router.post('/stripe', require('express').raw({ type: 'application/json' }), asy
         })
         await user.save({ validateBeforeSave: false })
 
+        logActivity({ type:'payment_succeeded', user, message:`Payment of $${amount} for ${user.plan} plan`, meta:{ amount, plan: user.plan, invoiceId: invoice.id } })
+
         // Sync Discord roles to reflect active subscription
         if (user.discordId) {
           syncRoles(user.discordId, user.plan, 'active').catch(e =>
@@ -85,7 +88,7 @@ router.post('/stripe', require('express').raw({ type: 'application/json' }), asy
           user.subscriptionStatus = 'cancelled'
           user.plan = 'free'
           await user.save({ validateBeforeSave: false })
-          // Remove all plan roles on cancellation
+          logActivity({ type:'subscription_cancelled', user, message:`Subscription cancelled for ${user.email}` })
           if (user.discordId) {
             syncRoles(user.discordId, 'free', 'cancelled').catch(e =>
               console.warn('[Discord] role removal failed after cancel:', e.message)
