@@ -1,8 +1,4 @@
-/**
- * ml.js — ML predictions route
- * Reads predictions from MongoDB (written by Python ML service)
- * Also proxies requests to FastAPI ML server for real-time predictions
- */
+
 
 const router   = require('express').Router()
 const { protect, requirePlan } = require('../middleware/auth')
@@ -24,7 +20,6 @@ async function mlFetch(path, options = {}) {
   }
 }
 
-// ── GET /api/ml/health ────────────────────────────────────────────────────
 router.get('/health', async (req, res) => {
   const health = await mlFetch('/health')
   const db     = mongoose.connection.db
@@ -51,12 +46,11 @@ router.get('/health', async (req, res) => {
   })
 })
 
-// ── GET /api/ml/predictions/batch ────────────────────────────────────────
 router.get('/predictions/batch', protect, async (req, res) => {
   try {
     const db   = mongoose.connection.db
     const now  = new Date()
-    const ago  = new Date(now - 48 * 60 * 60 * 1000)
+    const ago  = new Date(now - 48 * 60 * 60 * 1000) 
 
     const predictions = await db.collection('ml_predictions')
       .find({ generated_at: { $gte: ago.toISOString() } }, { projection: { _id: 0 } })
@@ -64,6 +58,7 @@ router.get('/predictions/batch', protect, async (req, res) => {
       .limit(20)
       .toArray()
 
+    
     const final = predictions.length > 0 ? predictions :
       await db.collection('ml_predictions')
         .find({}, { projection: { _id: 0 } })
@@ -77,7 +72,6 @@ router.get('/predictions/batch', protect, async (req, res) => {
   }
 })
 
-// ── GET /api/ml/predictions/:eventId ─────────────────────────────────────
 router.get('/predictions/:eventId', protect, async (req, res) => {
   try {
     const db   = mongoose.connection.db
@@ -90,6 +84,7 @@ router.get('/predictions/:eventId', protect, async (req, res) => {
       return res.json({ success: true, source: 'cache', prediction: pred })
     }
 
+    
     const live = await mlFetch(`/predictions/${req.params.eventId}`)
     res.json({ success: true, source: 'live', prediction: live })
   } catch (err) {
@@ -97,27 +92,98 @@ router.get('/predictions/:eventId', protect, async (req, res) => {
   }
 })
 
-// ── GET /api/ml/sharp-money ───────────────────────────────────────────────
 router.get('/sharp-money', protect, requirePlan('gold', 'platinum'), async (req, res) => {
   try {
     const data = await mlFetch('/sharp-money')
-    res.json({ success: true, ...data })
+
+    // If ML service returned real events, use them
+    if (!data.offline && data.count > 0) {
+      return res.json({ success: true, ...data })
+    }
+
+    // Fallback: derive line movement signals from live odds comparison
+    const apiService = require('../services/apiService')
+    const { data: allOdds } = await apiService.getAllOdds().catch(() => ({ data: [] }))
+    const events = []
+    for (const game of (allOdds || []).slice(0, 20)) {
+      const mkt  = (game.markets || [])[0]
+      const rows = mkt?.rows || []
+      if (rows.length < 2) continue
+      // Find the outcome with biggest spread between best and avg odds = line movement signal
+      for (const row of rows) {
+        const best = parseFloat(String(row.bestOdds || '0').replace('+',''))
+        const avg  = parseFloat(String(row.avgOdds  || '0').replace('+',''))
+        if (!best || !avg) continue
+        const spread = Math.abs(best - avg)
+        if (spread < 5) continue  // < 5 point spread — not significant
+        const direction = best > avg ? 'up' : 'down'
+        const probability = Math.min(0.92, 0.60 + spread / 200)
+        events.push({
+          event_id: game.id || game.game,
+          sport:    game.sport || '',
+          home:     game.homeTeam || '',
+          away:     game.awayTeam || '',
+          generated_at: new Date().toISOString(),
+          sharp_money: {
+            available:       true,
+            is_sharp:        true,
+            probability:     parseFloat(probability.toFixed(3)),
+            signal_strength: spread > 20 ? 'strong' : 'moderate',
+            direction,
+            from_line: avg  > 0 ? `+${Math.round(avg)}`  : String(Math.round(avg)),
+            to_line:   best > 0 ? `+${Math.round(best)}` : String(Math.round(best)),
+          },
+        })
+      }
+    }
+    events.sort((a, b) => b.sharp_money.probability - a.sharp_money.probability)
+    res.json({ success: true, count: events.slice(0,10).length, events: events.slice(0,10), source: 'live_fallback' })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
   }
 })
 
-// ── GET /api/ml/arb-windows ───────────────────────────────────────────────
 router.get('/arb-windows', protect, async (req, res) => {
   try {
     const data = await mlFetch('/arb-windows')
-    res.json({ success: true, ...data })
+
+    // If ML service returned real arbs, use them
+    if (!data.offline && data.count > 0) {
+      return res.json({ success: true, ...data })
+    }
+
+    // Fallback: use live arbitrage data from apiService
+    const apiService = require('../services/apiService')
+    const { data: allArbs } = await apiService.getArbitrage(0.5, null).catch(() => ({ data: [] }))
+    const arbs = (allArbs || []).slice(0, 10).map((a, i) => {
+      const profit  = a.profit || 0
+      const urgency = profit >= 4 ? 'critical' : profit >= 2.5 ? 'high' : profit >= 1.5 ? 'medium' : 'low'
+      const probMap = { critical: 88, high: 72, medium: 55, low: 38 }
+      const timeMap = { critical: 'Now', high: '5–15 min', medium: '15–45 min', low: '45–90 min' }
+      const legs    = a.legs || []
+      const books   = legs.map(l => (l.book || '').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()))
+      return {
+        event_id:    a.id || a.game || String(i),
+        sport:       (a.sport||'').replace(/.*_/,'').toUpperCase(),
+        home:        a.home || '',
+        away:        a.away || '',
+        market:      a.market || 'Moneyline',
+        profit_pct:  profit,
+        legs,
+        probability: probMap[urgency],
+        expectedIn:  timeMap[urgency],
+        prepTip:     books.length >= 2
+          ? `Have accounts funded at ${books.slice(0,2).join(' & ')}. Place both legs simultaneously.`
+          : 'Prepare accounts at both books. Act within 60s of spotting the window.',
+        window:      { urgency, available: true },
+      }
+    })
+    res.json({ success: true, count: arbs.length, arbs, source: 'live_fallback' })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
   }
 })
 
-// ── POST /api/ml/score-ev ─────────────────────────────────────────────────
 router.post('/score-ev', protect, requirePlan('platinum'), async (req, res) => {
   try {
     const data = await mlFetch('/predict/ev', {
@@ -130,7 +196,6 @@ router.post('/score-ev', protect, requirePlan('platinum'), async (req, res) => {
   }
 })
 
-// ── GET /api/ml/insights ──────────────────────────────────────────────────
 router.get('/insights', protect, async (req, res) => {
   try {
     const data = await mlFetch(`/insights/${req.user._id}`)
@@ -140,7 +205,6 @@ router.get('/insights', protect, async (req, res) => {
   }
 })
 
-// ── GET /api/ml/dashboard ─────────────────────────────────────────────────
 router.get('/dashboard', protect, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'Admin only' })
