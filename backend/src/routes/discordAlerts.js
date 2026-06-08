@@ -60,21 +60,18 @@ const SPORT_EMOJI = {
 // ─────────────────────────────────────────────
 // Tier thresholds
 // ─────────────────────────────────────────────
-// Basic gets alerts for >= 1% arb, >= 2% EV
-// Gold  gets alerts for >= 1.5% arb, >= 2.5% EV
-// Plat  gets ALL alerts >= 0.5% arb, >= 1.5% EV
 function getArbTiers(profit) {
   const t = []
-  if (profit >= 1.0) t.push('platinum')  // platinum gets everything ≥ 1%
-  if (profit >= 2.5) t.push('gold')       // gold gets solid arbs ≥ 2.5%
-  if (profit >= 4.0) t.push('basic')      // basic gets only rare hot arbs ≥ 4%
+  if (profit >= 1.0) t.push('platinum')
+  if (profit >= 2.5) t.push('gold')
+  if (profit >= 4.0) t.push('basic')
   return [...new Set(t)]
 }
 function getEVTiers(ev) {
   const t = []
-  if (ev >= 1.5) t.push('platinum')  // platinum gets everything ≥ 1.5%
-  if (ev >= 3.0) t.push('gold')       // gold gets ≥ 3%
-  if (ev >= 5.0) t.push('basic')      // basic gets only strong EV ≥ 5%
+  if (ev >= 1.5) t.push('platinum')
+  if (ev >= 3.0) t.push('gold')
+  if (ev >= 5.0) t.push('basic')
   return [...new Set(t)]
 }
 
@@ -176,9 +173,9 @@ function evEmbed(ev, region) {
         `**${REGION_TEXT[region]}**`,
       ].join('\n'),
       fields: [
-        { name: '📚 Book',    value: (ev.book || '—').replace(/_/g,' '), inline: true },
-        { name: '🎯 EV',      value: `+${evPct}%`, inline: true },
-        { name: '🏆 Sport',   value: ev.sport || '—', inline: true },
+        { name: '📚 Book',  value: (ev.book || '—').replace(/_/g,' '), inline: true },
+        { name: '🎯 EV',    value: `+${evPct}%`, inline: true },
+        { name: '🏆 Sport', value: ev.sport || '—', inline: true },
       ],
       footer: {
         text: 'TrueOdds • +EV bets are profitable long-term even without guarantees',
@@ -191,6 +188,57 @@ function evEmbed(ev, region) {
       components: [
         { type: 2, style: 5, label: '📈 View +EV Bets', url: 'https://trueodds.ca/dashboard/positive-ev' },
         { type: 2, style: 5, label: '🔑 Sign Up Free', url: 'https://trueodds.ca/signup' },
+      ],
+    }],
+  }
+}
+
+function oddsEmbed(game) {
+  const emoji  = SPORT_EMOJI[game.sport] || '🏅'
+  const isLive = game.isLive
+
+  const mkt  = (game.markets || [])[0]
+  const rows = (mkt?.rows || []).slice(0, 4)
+
+  const lines = rows.map(r => {
+    const bookName = (r.bestBook || '').replace(/_/g, ' ')
+    return `> **${r.selection}** — \`${r.bestOdds}\` @ ${bookName}  *(avg ${r.avgOdds})*`
+  }).join('\n') || '> See platform for full details'
+
+  const bookCount = rows.reduce((n, r) => n + Object.keys(r.books || {}).length, 0)
+
+  return {
+    username:   'TrueOdds Alerts',
+    avatar_url: 'https://trueodds.ca/favicon.ico',
+    embeds: [{
+      color: isLive ? 0xFF4444 : 0x3B82F6,
+      author: {
+        name:     `${isLive ? '🔴 LIVE' : '📊 Best Odds'} — ${game.sport}`,
+        url:      'https://trueodds.ca/dashboard/odds',
+        icon_url: 'https://trueodds.ca/favicon.ico',
+      },
+      title: `${emoji}  ${game.game}`,
+      url:   'https://trueodds.ca/dashboard/odds',
+      description: [
+        `**Market:** ${mkt?.name || 'Moneyline'}  |  **${isLive ? '🔴 In Progress' : `🕐 ${game.time}`}**`,
+        `**League:** ${game.league || game.sport}`,
+        '',
+        '**💰 Best available odds:**',
+        lines,
+        '',
+        `Compared across **${bookCount}** bookmaker lines`,
+      ].join('\n'),
+      footer: {
+        text:     'TrueOdds • Odds update every 60s — shop lines to maximise value',
+        icon_url: 'https://trueodds.ca/favicon.ico',
+      },
+      timestamp: new Date().toISOString(),
+    }],
+    components: [{
+      type: 1,
+      components: [
+        { type: 2, style: 5, label: '📊 View Full Odds', url: 'https://trueodds.ca/dashboard/odds' },
+        { type: 2, style: 5, label: '🔑 Sign Up Free',  url: 'https://trueodds.ca/signup' },
       ],
     }],
   }
@@ -237,15 +285,15 @@ function cronAuth(req, res, next) {
 // ─────────────────────────────────────────────
 router.post('/', cronAuth, async (req, res) => {
   const WH      = webhooks()
-  const results = { arbs_checked: 0, arbs_sent: 0, ev_checked: 0, ev_sent: 0, skipped: 0, errors: [] }
+  const results = { arbs_checked: 0, arbs_sent: 0, ev_checked: 0, ev_sent: 0, odds_checked: 0, odds_sent: 0, skipped: 0, errors: [] }
   const log     = []
 
   try {
-    // ── Fetch arbs via internal API ──────────────────────────────────────────
     const apiService = require('../services/apiService')
+
+    // ── Arbitrage ────────────────────────────────────────────────────────────
     const { data: allArbs } = await apiService.getArbitrage(0, null)
 
-    // Top 3 by profit, min 0.5%
     const topArbs = (allArbs || [])
       .filter(a => a.profit >= 0.5)
       .sort((a, b) => b.profit - a.profit)
@@ -267,7 +315,7 @@ router.post('/', cronAuth, async (req, res) => {
         const r = await sendWebhook(WH[tier]?.arb, payload)
         if (r.ok) { sent.push(tier); log.push(`✅ arb → ${tier} (${arb.game}, ${arb.profit}%)`) }
         else if (!r.skipped) { results.errors.push({ tier, type: 'arb', ...r }); log.push(`❌ arb → ${tier}: ${r.status || r.error}`) }
-        await new Promise(r => setTimeout(r, 500)) // rate limit
+        await new Promise(r => setTimeout(r, 500))
       }
 
       if (sent.length) {
@@ -276,7 +324,7 @@ router.post('/', cronAuth, async (req, res) => {
       }
     }
 
-    // ── Fetch +EV bets ───────────────────────────────────────────────────────
+    // ── +EV Bets ─────────────────────────────────────────────────────────────
     try {
       const { data: allEV } = await apiService.getPositiveEV(1.5, null)
       const topEV = (allEV || [])
@@ -311,6 +359,49 @@ router.post('/', cronAuth, async (req, res) => {
     } catch (evErr) {
       results.errors.push({ type: 'ev_fetch', error: evErr.message })
       log.push(`⚠️ EV fetch error: ${evErr.message}`)
+    }
+
+    // ── Live Odds ─────────────────────────────────────────────────────────────
+    try {
+      const { data: allOdds } = await apiService.getAllOdds()
+
+      const topGames = (allOdds || [])
+        .filter(g => {
+          const mkt   = (g.markets || [])[0]
+          const books = (mkt?.rows || []).reduce((n, r) => n + Object.keys(r.books || {}).length, 0)
+          return books >= 3
+        })
+        .sort((a, b) => {
+          if (a.isLive !== b.isLive) return a.isLive ? -1 : 1
+          return 0
+        })
+        .slice(0, 3)
+
+      results.odds_checked = topGames.length
+
+      for (const game of topGames) {
+        const alertId = `odds_${(game.id || game.game || '').replace(/\s/g,'_')}`
+        const exists  = await AlertSent.findOne({ alertId })
+        if (exists) { results.skipped++; continue }
+
+        const payload = oddsEmbed(game)
+        const sent    = []
+
+        for (const tier of ['platinum', 'gold', 'basic']) {
+          const r = await sendWebhook(WH[tier]?.odds, payload)
+          if (r.ok) { sent.push(tier); log.push(`✅ odds → ${tier} (${game.game})`) }
+          else if (!r.skipped) { results.errors.push({ tier, type: 'odds', ...r }); log.push(`❌ odds → ${tier}: ${r.status || r.error}`) }
+          await new Promise(r => setTimeout(r, 500))
+        }
+
+        if (sent.length) {
+          await AlertSent.create({ alertId, type: 'odds', profit: 0, region: 'BOTH' })
+          results.odds_sent++
+        }
+      }
+    } catch (oddsErr) {
+      results.errors.push({ type: 'odds_fetch', error: oddsErr.message })
+      log.push(`⚠️ Odds fetch error: ${oddsErr.message}`)
     }
 
     res.json({ success: true, timestamp: new Date().toISOString(), ...results, log })
