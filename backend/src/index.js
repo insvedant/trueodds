@@ -25,6 +25,7 @@ function getAllowedOrigins() {
 }
 
 const app    = express()
+app.set('trust proxy', 1) // Trust Render's reverse proxy for accurate IP detection
 const server = http.createServer(app)
 const io     = new Server(server, {
   cors: { origin: getAllowedOrigins(), methods: ['GET','POST'], credentials: true }
