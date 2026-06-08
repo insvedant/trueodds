@@ -54,24 +54,27 @@ const REGION_TEXT = {
 
 const SPORT_EMOJI = {
   NHL:'🏒', NBA:'🏀', MLB:'⚾', NFL:'🏈', CFL:'🏈',
-  Soccer:'⚽', Tennis:'🎾', UFC:'🥊', Boxing:'🥊', Golf:'⛳',
+  Soccer:'⚽', Tennis:'🎾', UFC:'🥊', Boxing:'🥊', Golf:'⛳', F1:'🏎️',
 }
 
 // ─────────────────────────────────────────────
 // Tier thresholds
 // ─────────────────────────────────────────────
+// Basic gets alerts for >= 1% arb, >= 2% EV
+// Gold  gets alerts for >= 1.5% arb, >= 2.5% EV
+// Plat  gets ALL alerts >= 0.5% arb, >= 1.5% EV
 function getArbTiers(profit) {
   const t = []
-  if (profit >= 1.0) t.push('platinum')
-  if (profit >= 2.5) t.push('gold')
-  if (profit >= 4.0) t.push('basic')
+  if (profit >= 1.0) t.push('platinum')  // platinum gets everything ≥ 1%
+  if (profit >= 2.5) t.push('gold')       // gold gets solid arbs ≥ 2.5%
+  if (profit >= 4.0) t.push('basic')      // basic gets only rare hot arbs ≥ 4%
   return [...new Set(t)]
 }
 function getEVTiers(ev) {
   const t = []
-  if (ev >= 1.5) t.push('platinum')
-  if (ev >= 3.0) t.push('gold')
-  if (ev >= 5.0) t.push('basic')
+  if (ev >= 1.5) t.push('platinum')  // platinum gets everything ≥ 1.5%
+  if (ev >= 3.0) t.push('gold')       // gold gets ≥ 3%
+  if (ev >= 5.0) t.push('basic')      // basic gets only strong EV ≥ 5%
   return [...new Set(t)]
 }
 
@@ -173,9 +176,9 @@ function evEmbed(ev, region) {
         `**${REGION_TEXT[region]}**`,
       ].join('\n'),
       fields: [
-        { name: '📚 Book',  value: (ev.book || '—').replace(/_/g,' '), inline: true },
-        { name: '🎯 EV',    value: `+${evPct}%`, inline: true },
-        { name: '🏆 Sport', value: ev.sport || '—', inline: true },
+        { name: '📚 Book',    value: (ev.book || '—').replace(/_/g,' '), inline: true },
+        { name: '🎯 EV',      value: `+${evPct}%`, inline: true },
+        { name: '🏆 Sport',   value: ev.sport || '—', inline: true },
       ],
       footer: {
         text: 'TrueOdds • +EV bets are profitable long-term even without guarantees',
@@ -197,8 +200,9 @@ function oddsEmbed(game) {
   const emoji  = SPORT_EMOJI[game.sport] || '🏅'
   const isLive = game.isLive
 
+  // Build a compact best-odds table from the first market (Moneyline)
   const mkt  = (game.markets || [])[0]
-  const rows = (mkt?.rows || []).slice(0, 4)
+  const rows = (mkt?.rows || []).slice(0, 4) // max 4 outcomes (handles draws etc.)
 
   const lines = rows.map(r => {
     const bookName = (r.bestBook || '').replace(/_/g, ' ')
@@ -289,11 +293,11 @@ router.post('/', cronAuth, async (req, res) => {
   const log     = []
 
   try {
+    // ── Fetch arbs via internal API ──────────────────────────────────────────
     const apiService = require('../services/apiService')
-
-    // ── Arbitrage ────────────────────────────────────────────────────────────
     const { data: allArbs } = await apiService.getArbitrage(0, null)
 
+    // Top 3 by profit, min 0.5%
     const topArbs = (allArbs || [])
       .filter(a => a.profit >= 0.5)
       .sort((a, b) => b.profit - a.profit)
@@ -315,7 +319,7 @@ router.post('/', cronAuth, async (req, res) => {
         const r = await sendWebhook(WH[tier]?.arb, payload)
         if (r.ok) { sent.push(tier); log.push(`✅ arb → ${tier} (${arb.game}, ${arb.profit}%)`) }
         else if (!r.skipped) { results.errors.push({ tier, type: 'arb', ...r }); log.push(`❌ arb → ${tier}: ${r.status || r.error}`) }
-        await new Promise(r => setTimeout(r, 500))
+        await new Promise(r => setTimeout(r, 500)) // rate limit
       }
 
       if (sent.length) {
@@ -324,7 +328,7 @@ router.post('/', cronAuth, async (req, res) => {
       }
     }
 
-    // ── +EV Bets ─────────────────────────────────────────────────────────────
+    // ── Fetch +EV bets ───────────────────────────────────────────────────────
     try {
       const { data: allEV } = await apiService.getPositiveEV(1.5, null)
       const topEV = (allEV || [])
@@ -361,10 +365,14 @@ router.post('/', cronAuth, async (req, res) => {
       log.push(`⚠️ EV fetch error: ${evErr.message}`)
     }
 
-    // ── Live Odds ─────────────────────────────────────────────────────────────
+    // ── Fetch Live Odds ──────────────────────────────────────────────────────
+    // Send top 3 upcoming/live games with the most books posting lines.
+    // Dedup TTL is 1 hour so each game only fires once per hour.
     try {
       const { data: allOdds } = await apiService.getAllOdds()
 
+      // Pick games that have at least 3 books and are within 48h or live
+      const now = Date.now()
       const topGames = (allOdds || [])
         .filter(g => {
           const mkt   = (g.markets || [])[0]
@@ -372,6 +380,7 @@ router.post('/', cronAuth, async (req, res) => {
           return books >= 3
         })
         .sort((a, b) => {
+          // live games first, then soonest upcoming
           if (a.isLive !== b.isLive) return a.isLive ? -1 : 1
           return 0
         })
@@ -387,6 +396,7 @@ router.post('/', cronAuth, async (req, res) => {
         const payload = oddsEmbed(game)
         const sent    = []
 
+        // Odds go to ALL tiers (basic gets the same odds data — it's a preview/value tool)
         for (const tier of ['platinum', 'gold', 'basic']) {
           const r = await sendWebhook(WH[tier]?.odds, payload)
           if (r.ok) { sent.push(tier); log.push(`✅ odds → ${tier} (${game.game})`) }
