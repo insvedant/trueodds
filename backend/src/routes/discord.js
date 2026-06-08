@@ -12,13 +12,8 @@ const router  = require('express').Router()
 const crypto  = require('crypto')
 const User    = require('../models/User')
 const { protect, adminOnly } = require('../middleware/auth')
-const {
-  getOAuthURL,
-  exchangeCode,
-  getDiscordUser,
-  addMemberToGuild,
-  syncRoles,
-} = require('../services/discordService')
+const { getOAuthURL, exchangeCode, getDiscordUser, addMemberToGuild, syncRoles } = require('../services/discordService')
+const { logActivity } = require('../services/logActivity')
 
 // In-memory state store for CSRF protection (state param)
 // In production you could use Redis or short-lived JWT instead
@@ -98,6 +93,7 @@ router.get('/callback', async (req, res) => {
     // Assign correct role immediately
     await syncRoles(discordUser.id, user.plan, user.subscriptionStatus)
 
+    logActivity({ type:'discord_connected', user, message:`Discord connected: ${discordUser.username}`, meta:{ discordId: discordUser.id, discordUsername: discordUser.username } })
     return res.redirect(`${frontendBase}/dashboard/settings?discord=connected`)
   } catch (err) {
     console.error('[Discord OAuth]', err)
@@ -120,6 +116,7 @@ router.post('/disconnect', protect, async (req, res) => {
     req.user.discordUsername = undefined
     await req.user.save({ validateBeforeSave: false })
 
+    logActivity({ type:'discord_disconnected', user: req.user, ip: req.ip, message:`Discord unlinked`, meta:{ discordId } })
     res.json({ success: true, message: 'Discord account unlinked and roles removed.' })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
