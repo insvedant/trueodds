@@ -7,9 +7,9 @@ const ODDS_BASE     = 'https://api.the-odds-api.com/v4'
 const SPORTSDB_BASE = 'https://www.thesportsdb.com/api/v1/json/3'
 
 const TTL = {
-  ODDS:      1  * 60,          
-  SCORES:    10 * 60,          
-  TEAM_META: 24 * 60 * 60,    
+  ODDS:      5  * 60,          // 5 minutes (was 1 min — was burning quota fast)
+  SCORES:    10 * 60,          // 10 minutes
+  TEAM_META: 24 * 60 * 60,    // 24 hours
 }
 
 const ALL_BOOKS = [
@@ -71,10 +71,15 @@ async function fetchJSON(url, headers = {}) {
   const remaining = res.headers.get('x-requests-remaining')
   const used      = res.headers.get('x-requests-used')
   if (remaining !== null) {
+    const prev = quotaState.remaining
     quotaState.remaining = parseInt(remaining)
     quotaState.used      = parseInt(used || '0')
     quotaState.lastCheck = new Date()
-    console.log(`[TheOddsAPI] Remaining quota: ${remaining} | Used: ${used}`)
+    // Only log when quota is low or drops by 1000+ (not every single call)
+    const dropped = prev - quotaState.remaining
+    if (quotaState.remaining < 500000 || dropped >= 1000) {
+      console.log(`[TheOddsAPI] Remaining: ${remaining} | Used: ${used}`)
+    }
   }
 
   if (!res.ok) {
