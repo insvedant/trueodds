@@ -28,7 +28,6 @@ TRACKED_SPORTS = [
     "soccer_epl",
     "mma_mixed_martial_arts",
     "tennis_atp_french_open",
-    "motorsport_formula_world_championship",
 ]
 
 TRACKED_BOOKS = [
