@@ -41,6 +41,7 @@ const SPORTS = [
   'soccer_fifa_world_cup',
   'mma_mixed_martial_arts',
   'boxing_boxing',
+  'motorsport_formula_world_championship',
   'tennis_atp_french_open',
   'tennis_wta_french_open',
   'tennis_atp_wimbledon',
@@ -130,22 +131,38 @@ async function getAllOdds() {
 
   if (!isKeyConfigured()) return { data: [], source: 'mock' }
 
-  const results = await Promise.allSettled(
-    SPORTS.map(sport => getOdds(sport, 'h2h'))
-  )
+  // Football/hockey get spreads too — more books post spread lines = more arb
+  const SPREAD_SPORTS = ['americanfootball_cfl','americanfootball_nfl','icehockey_nhl']
 
-  const combined = []
-  for (const r of results) {
-    if (r.status === 'fulfilled' && r.value.data?.length) {
-      combined.push(...r.value.data)
+  const fetches = []
+  for (const sport of SPORTS) {
+    const markets = SPREAD_SPORTS.includes(sport) ? ['h2h','spreads'] : ['h2h']
+    for (const market of markets) {
+      fetches.push(getOdds(sport, market))
     }
   }
+
+  const results = await Promise.allSettled(fetches)
+
+  // Merge by game id so spread + h2h markets combine into one game object
+  const gameMap = {}
+  for (const res of results) {
+    if (res.status !== 'fulfilled' || !res.value.data || !res.value.data.length) continue
+    for (const game of res.value.data) {
+      if (gameMap[game.id]) {
+        gameMap[game.id].markets.push(...game.markets)
+      } else {
+        gameMap[game.id] = Object.assign({}, game, { markets: [...game.markets] })
+      }
+    }
+  }
+
+  const combined = Object.values(gameMap)
 
   if (combined.length > 0) {
     await Cache.set(key, combined, TTL.ODDS, 'api')
     return { data: combined, source: 'api' }
   }
-  // Don't cache empty — try again next time
   return { data: [], source: 'empty' }
 }
 
@@ -199,7 +216,9 @@ async function getPositiveEV(minEV = 0, sport = null) {
     : await getAllOdds()
 
   const evBets = calcEV(odds, minEV)
-  await Cache.set(key, evBets, TTL.ODDS, source)
+  if (evBets.length > 0) {
+    await Cache.set(key, evBets, TTL.ODDS, source)
+  }
   return { data: evBets, source }
 }
 
@@ -284,6 +303,8 @@ const SPORT_LABELS = {
   americanfootball_cfl:                   'CFL',
   icehockey_ahl:                          'AHL',
   mma_mixed_martial_arts:                 'UFC',
+  boxing_boxing:                          'Boxing',
+  motorsport_formula_world_championship:  'F1',
   tennis_atp_french_open:                 'Tennis',
   tennis_wta_french_open:                 'Tennis',
   tennis_atp_us_open:                     'Tennis',
