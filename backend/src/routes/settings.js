@@ -7,15 +7,18 @@ const DEFAULTS = {
   twitter:   '',
   discord:   '',
   facebook:  '',
+  pinterest: '',
 }
 
 router.get('/public', async (req, res) => {
   try {
     const all = await getAllSettings()
     const social = {
-      instagram: all.instagram || DEFAULTS.instagram,
-      twitter:   all.twitter   || DEFAULTS.twitter,
-      discord:   all.discord   || DEFAULTS.discord,
+      instagram: all.instagram || '',
+      twitter:   all.twitter   || '',
+      discord:   all.discord   || '',
+      facebook:  all.facebook  || '',
+      pinterest: all.pinterest || '',
     }
     res.json({ success: true, social })
   } catch (err) {
@@ -34,7 +37,7 @@ router.get('/', protect, adminOnly, async (req, res) => {
 
 router.put('/', protect, adminOnly, async (req, res) => {
   try {
-    const allowed = ['instagram', 'twitter', 'discord', 'facebook']
+    const allowed = ['instagram', 'twitter', 'discord', 'facebook', 'pinterest']
     for (const key of allowed) {
       if (req.body[key] !== undefined) {
         await setSetting(key, req.body[key])
