@@ -54,7 +54,7 @@ const REGION_TEXT = {
 
 const SPORT_EMOJI = {
   NHL:'🏒', NBA:'🏀', MLB:'⚾', NFL:'🏈', CFL:'🏈',
-  Soccer:'⚽', Tennis:'🎾', UFC:'🥊', Boxing:'🥊', Golf:'⛳', F1:'🏎️',
+  Soccer:'⚽', Tennis:'🎾', UFC:'🥊', Boxing:'🥊', Golf:'⛳',
 }
 
 // ─────────────────────────────────────────────
