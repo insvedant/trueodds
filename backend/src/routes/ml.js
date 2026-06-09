@@ -21,29 +21,39 @@ async function mlFetch(path, options = {}) {
 }
 
 router.get('/health', async (req, res) => {
-  const health = await mlFetch('/health')
-  const db     = mongoose.connection.db
+  try {
+    const health = await mlFetch('/health')
+    const db     = mongoose.connection.db
 
-  const snapshots   = await db.collection('odds_snapshots').countDocuments()
-  const predictions = await db.collection('ml_predictions').countDocuments()
-  const lineMovs    = await db.collection('line_movements').countDocuments()
-  const arbHistory  = await db.collection('arb_history').countDocuments()
+    // Use Promise.race with timeout so DB counts don't hang
+    const withTimeout = (p, ms = 3000) =>
+      Promise.race([p, new Promise(r => setTimeout(() => r(0), ms))])
 
-  res.json({
-    success: true,
-    ml_service: health.offline ? 'offline' : 'online',
-    data_pipeline: {
-      odds_snapshots:  snapshots,
-      predictions:     predictions,
-      line_movements:  lineMovs,
-      arb_history:     arbHistory,
-      ready_for_ml:    snapshots >= 500,
-      status:          snapshots < 100  ? 'collecting'
-                     : snapshots < 500  ? 'building'
-                     : 'ready',
-    },
-    ml_health: health,
-  })
+    const [snapshots, predictions, lineMovs, arbHistory] = await Promise.all([
+      withTimeout(db.collection('odds_snapshots').countDocuments()),
+      withTimeout(db.collection('ml_predictions').countDocuments()),
+      withTimeout(db.collection('line_movements').countDocuments()),
+      withTimeout(db.collection('arb_history').countDocuments()),
+    ])
+
+    res.json({
+      success: true,
+      ml_service: health.offline ? 'offline' : 'online',
+      data_pipeline: {
+        odds_snapshots:  snapshots,
+        predictions:     predictions,
+        line_movements:  lineMovs,
+        arb_history:     arbHistory,
+        ready_for_ml:    snapshots >= 500,
+        status:          snapshots < 100  ? 'collecting'
+                       : snapshots < 500  ? 'building'
+                       : 'ready',
+      },
+      ml_health: health,
+    })
+  } catch (err) {
+    res.json({ success: false, message: err.message })
+  }
 })
 
 router.get('/predictions/batch', protect, async (req, res) => {
@@ -92,7 +102,7 @@ router.get('/predictions/:eventId', protect, async (req, res) => {
   }
 })
 
-router.get('/sharp-money', protect, requirePlan('gold', 'platinum'), async (req, res) => {
+router.get('/sharp-money', protect, async (req, res) => {
   try {
     const data = await mlFetch('/sharp-money')
     if (!data.offline && data.count > 0) {
@@ -218,8 +228,48 @@ router.post('/score-ev', protect, requirePlan('platinum'), async (req, res) => {
 
 router.get('/insights', protect, async (req, res) => {
   try {
-    const data = await mlFetch(`/insights/${req.user._id}`)
-    res.json({ success: true, ...data })
+    const db  = mongoose.connection.db
+    const uid = req.user._id.toString()
+
+    // Try ML service first
+    const mlData = await mlFetch(`/insights/${uid}`)
+    if (!mlData.offline && mlData.available !== false) {
+      return res.json({ success: true, ...mlData })
+    }
+
+    // Fallback: compute from Bet collection directly
+    const Bet = require('../models/Bet')
+    const bets = await Bet.find({ user: req.user._id }).lean()
+    const settled = bets.filter(b => b.result !== 'pending')
+    const wins    = settled.filter(b => b.result === 'win')
+    const totalStake  = settled.reduce((s, b) => s + (b.stake  || 0), 0)
+    const totalProfit = settled.reduce((s, b) => s + (b.profit || 0), 0)
+
+    // Sport breakdown
+    const sportMap = {}
+    settled.forEach(b => {
+      const s = b.sport || 'Other'
+      if (!sportMap[s]) sportMap[s] = { bets: 0, wins: 0, profit: 0 }
+      sportMap[s].bets++
+      if (b.result === 'win') sportMap[s].wins++
+      sportMap[s].profit += b.profit || 0
+    })
+    const sport_breakdown = Object.entries(sportMap)
+      .map(([sport, d]) => ({ sport, ...d, winRate: d.bets ? +(d.wins / d.bets * 100).toFixed(1) : 0 }))
+      .sort((a, b) => b.profit - a.profit)
+
+    res.json({
+      success: true,
+      source: 'db',
+      total_bets:   bets.length,
+      settled_bets: settled.length,
+      wins:         wins.length,
+      total_stake:  +totalStake.toFixed(2),
+      total_profit: +totalProfit.toFixed(2),
+      roi:          totalStake ? +(totalProfit / totalStake * 100).toFixed(1) : 0,
+      win_rate:     settled.length ? +(wins.length / settled.length * 100).toFixed(1) : 0,
+      sport_breakdown,
+    })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
   }
