@@ -23,10 +23,12 @@ async function mlFetch(path, options = {}) {
 router.get('/health', async (req, res) => {
   try {
     const health = await mlFetch('/health')
-    const db     = mongoose.connection.db
 
-    // Use Promise.race with timeout so DB counts don't hang
-    const withTimeout = (p, ms = 3000) =>
+    // Explicitly use 'trueodds' db — mongoose.connection.db may point to wrong db
+    // if the URI doesn't include the database name
+    const db = mongoose.connection.useDb('trueodds', { useCache: true })
+
+    const withTimeout = (p, ms = 4000) =>
       Promise.race([p, new Promise(r => setTimeout(() => r(0), ms))])
 
     const [snapshots, predictions, lineMovs, arbHistory] = await Promise.all([
