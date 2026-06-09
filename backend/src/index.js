@@ -56,6 +56,9 @@ app.get('/health', (req, res) => res.json({
   stripePlatinum: (process.env.STRIPE_PRICE_PLATINUM_MONTHLY || process.env.STRIPE_PRICE_PLATINUM) ? 'set' : 'missing',
 }))
 
+// Alias so both /health and /api/health work
+app.get('/api/health', (req, res) => res.redirect('/health'))
+
 app.use('/api/auth',          require('./routes/auth'))
 app.use('/api/subscriptions', require('./routes/subscriptions'))
 app.use('/api/hedge',         require('./routes/hedge'))
