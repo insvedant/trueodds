@@ -325,8 +325,9 @@ function transformOdds(games, sportKey, market) {
     .filter(game => {
       if (!game.commence_time) return true
       const gameTime = new Date(game.commence_time).getTime()
-      // Show games up to 7 days in the past (completed/recent) and 30 days future
-      return gameTime >= now - 7 * 24 * 60 * 60 * 1000
+      // For EV/arb calculations only show games starting within next 7 days
+      // or already started within last 3 hours (live)
+      return gameTime >= now - 3 * 60 * 60 * 1000
     })
     .map(game => {
     const allBooks = {}
@@ -472,6 +473,7 @@ function calcEV(games, minEV = 0) {
           const bookDec = dec(bookOdds)
           const ev      = (trueProb * bookDec - 1) * 100
           if (ev < minEV) continue
+          if (ev > 30) continue  // Skip unrealistic values — indicates stale/mismatched odds
 
           const b     = bookDec - 1
           const q     = 1 - trueProb
