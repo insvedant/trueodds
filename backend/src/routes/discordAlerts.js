@@ -22,6 +22,7 @@
 const express  = require('express')
 const router   = express.Router()
 const mongoose = require('mongoose')
+const { postTweet, formatArbTweet, formatEVTweet } = require('../services/twitterService')
 
 // ─────────────────────────────────────────────
 // Book → Region mapping
@@ -412,6 +413,52 @@ router.post('/', cronAuth, async (req, res) => {
     } catch (oddsErr) {
       results.errors.push({ type: 'odds_fetch', error: oddsErr.message })
       log.push(`⚠️ Odds fetch error: ${oddsErr.message}`)
+    }
+
+    // ── Twitter / X Posts ────────────────────────────────────────────────────
+    // Post best arb and best EV to Twitter — only arbs above 2% and EV above 3%
+    // Uses a separate dedup key with 4-hour TTL so Twitter doesn't get spammed
+    try {
+      const { data: twitterArbs } = await apiService.getArbitrage(2, null)
+      const bestArb = (twitterArbs || []).sort((a, b) => b.profit - a.profit)[0]
+      if (bestArb) {
+        const twitterArbId = `twitter_arb_${(bestArb.game || '').replace(/\s/g,'_')}`
+        const alreadyTweeted = await AlertSent.findOne({ alertId: twitterArbId })
+        if (!alreadyTweeted) {
+          const region = detectRegion(bestArb.b1, bestArb.b2)
+          const tweet  = formatArbTweet(bestArb, region)
+          const result = await postTweet(tweet)
+          if (result.ok) {
+            await AlertSent.create({ alertId: twitterArbId, type: 'twitter_arb', profit: bestArb.profit, region })
+            results.twitter_sent++
+            log.push(`🐦 Tweeted arb: ${bestArb.game} +${bestArb.profit}%`)
+          } else {
+            log.push(`⚠️ Twitter arb failed: ${result.status || result.reason}`)
+          }
+        }
+      }
+
+      const { data: twitterEV } = await apiService.getPositiveEV(3, null)
+      const bestEV = (twitterEV || []).sort((a, b) => b.ev - a.ev)[0]
+      if (bestEV) {
+        const twitterEVId = `twitter_ev_${(bestEV.game || '').replace(/\s/g,'_')}_${(bestEV.book||'').replace(/\s/g,'_')}`
+        const alreadyTweeted = await AlertSent.findOne({ alertId: twitterEVId })
+        if (!alreadyTweeted) {
+          const region = detectRegion(bestEV.book, '')
+          const tweet  = formatEVTweet(bestEV, region)
+          const result = await postTweet(tweet)
+          if (result.ok) {
+            await AlertSent.create({ alertId: twitterEVId, type: 'twitter_ev', profit: bestEV.ev, region })
+            results.twitter_sent++
+            log.push(`🐦 Tweeted EV: ${bestEV.game} +${bestEV.ev}%`)
+          } else {
+            log.push(`⚠️ Twitter EV failed: ${result.status || result.reason}`)
+          }
+        }
+      }
+    } catch (twitterErr) {
+      results.errors.push({ type: 'twitter', error: twitterErr.message })
+      log.push(`⚠️ Twitter error: ${twitterErr.message}`)
     }
 
     res.json({ success: true, timestamp: new Date().toISOString(), ...results, log })
