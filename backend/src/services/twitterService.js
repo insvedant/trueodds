@@ -117,8 +117,7 @@ function formatArbTweet(arb, region) {
     `💰 +${profit}% guaranteed profit`,
     `📚 ${b1} vs ${b2}`,
     ``,
-    `🔒 Full details + calculator:`,
-    `👉 trueodds.ca`,
+    `Full details + calculator on TrueOdds.`,
     ``,
     `#SportsBetting #Arbitrage #BettingTips #FreePick`,
   ].join('\n').slice(0, 280)
@@ -138,7 +137,7 @@ function formatEVTweet(ev, region) {
     `📚 Book: ${book}`,
     ``,
     `Positive EV bets are profitable long-term.`,
-    `👉 trueodds.ca`,
+    `Find more on TrueOdds.`,
     ``,
     `#SportsBetting #ValueBetting #PlusEV #BettingTips`,
   ].join('\n').slice(0, 280)
