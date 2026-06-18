@@ -4,6 +4,9 @@ Avoids any import-time indentation issues by running the scheduler directly.
 """
 import os
 import sys
+from dotenv import load_dotenv
+
+load_dotenv("/home/ubuntu/trueodds/ml/.env")
 
 # Add repo root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
