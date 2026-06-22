@@ -36,11 +36,39 @@ async function createSubscriptionWithTrial({ name, email, planId, paymentMethodI
   
   await stripe.paymentMethods.attach(paymentMethodId, { customer: customer.id })
 
+  // ── Active sale check ──────────────────────────────────────────────────
+  // Looks up the base plan (strips '_yearly' suffix) and applies the
+  // matching Stripe Coupon ID server-side if a sale is currently live.
+  // If anything here fails, we silently fall back to full price rather
+  // than blocking checkout — a broken promo should never break payments.
+  let coupon = undefined
+  try {
+    const Promotion = require('../models/Promotion')
+    const promo = await Promotion.getSingleton()
+    const expired = promo.endsAt && new Date(promo.endsAt) < new Date()
+    const saleLive = promo.active && !expired
+
+    if (saleLive) {
+      const basePlan = planId.replace('_yearly', '') // basic_yearly -> basic
+      const couponId = promo.coupons?.[basePlan]
+      if (couponId) {
+        // Confirm the coupon is still valid on Stripe's side too — handles
+        // the case where it expired or hit max redemptions even if our own
+        // `active` flag is stale.
+        const stripeCoupon = await stripe.coupons.retrieve(couponId)
+        if (stripeCoupon.valid) coupon = couponId
+      }
+    }
+  } catch (e) {
+    console.warn('[Promotion] coupon lookup failed, proceeding at full price:', e.message)
+  }
+
   
   const subscription = await stripe.subscriptions.create({
     customer:    customer.id,
     items:       [{ price: PRICE_IDS[planId] }],
     trial_period_days: TRIAL_DAYS,
+    coupon,
     payment_settings: {
       payment_method_types: ['card', 'paypal'],
       save_default_payment_method: 'on_subscription',
