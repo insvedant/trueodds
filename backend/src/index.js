@@ -14,18 +14,16 @@ function getAllowedOrigins() {
   const fe = process.env.FRONTEND_URL
   if (fe) {
     base.push(fe)
-    
     if (fe.includes('://www.')) base.push(fe.replace('://www.', '://'))
     else base.push(fe.replace('://', '://www.'))
   }
-  
   base.push('https://trueodds.ca', 'https://www.trueodds.ca')
   base.push('https://trueodds.us', 'https://www.trueodds.us')
   return base
 }
 
 const app    = express()
-app.set('trust proxy', 1) // Trust Render's reverse proxy for accurate IP detection
+app.set('trust proxy', 1)
 const server = http.createServer(app)
 const io     = new Server(server, {
   cors: { origin: getAllowedOrigins(), methods: ['GET','POST'], credentials: true }
@@ -56,7 +54,6 @@ app.get('/health', (req, res) => res.json({
   stripePlatinum: (process.env.STRIPE_PRICE_PLATINUM_MONTHLY || process.env.STRIPE_PRICE_PLATINUM) ? 'set' : 'missing',
 }))
 
-// Alias so both /health and /api/health work
 app.get('/api/health', (req, res) => res.redirect('/health'))
 
 app.use('/api/auth',          require('./routes/auth'))
@@ -89,7 +86,6 @@ app.use((err, req, res, next) => {
 })
 
 io.on('connection', socket => {
-  
   const interval = setInterval(() => {
     socket.emit('odds_update', { timestamp: new Date() })
   }, 10000)
@@ -106,7 +102,6 @@ server.listen(PORT, '0.0.0.0', () => {
   const hasStripe = process.env.STRIPE_SECRET_KEY?.startsWith('sk_')
   console.log(`💳 Stripe: ${hasStripe ? '✅ Configured' : '⚠️  Add STRIPE_SECRET_KEY'}`)
 
-  
   const { registerWebhook } = require('./services/telegramService')
   registerWebhook().catch(() => {})
 })
@@ -114,10 +109,11 @@ server.listen(PORT, '0.0.0.0', () => {
 mongoose.connect(process.env.MONGODB_URI)
   .then(async () => {
     console.log('✅ MongoDB connected')
-    // Ensure admin account exists with correct credentials
+
+    // ── Admin account upsert ──────────────────────────────────────────────────
     try {
       const User = require('./models/User')
-      const adminEmail = process.env.ADMIN_EMAIL || 'admin@trueodds.com'
+      const adminEmail    = process.env.ADMIN_EMAIL    || 'admin@trueodds.com'
       const adminPassword = process.env.ADMIN_PASSWORD || 'true11d'
       let admin = await User.findOne({ email: adminEmail })
       if (!admin) {
@@ -132,7 +128,6 @@ mongoose.connect(process.env.MONGODB_URI)
         })
         console.log('✅ Admin account created:', adminEmail)
       } else {
-        // Always ensure admin has correct role and update password
         const bcrypt = require('bcryptjs')
         const hashed = await bcrypt.hash(adminPassword, 12)
         await User.findByIdAndUpdate(admin._id, {
@@ -146,6 +141,43 @@ mongoose.connect(process.env.MONGODB_URI)
     } catch (e) {
       console.warn('⚠️  Admin upsert failed:', e.message)
     }
+
+    // ── Cache Warmer ──────────────────────────────────────────────────────────
+    // Pre-warms arb + EV + odds on startup, then re-warms every 4.5 min
+    // (slightly under the 5-min TTL) so users always hit a warm cache.
+    const { getAllOdds, getArbitrage, getPositiveEV } = require('./services/apiService')
+
+    async function warmCache() {
+      try {
+        console.log('[CacheWarmer] Warming dashboard cache...')
+        // getAllOdds first — arb & EV both depend on it and will hit L1 once it's warm
+        await getAllOdds()
+        await Promise.allSettled([
+          getArbitrage(0, null),
+          getPositiveEV(0, null),
+        ])
+        console.log('[CacheWarmer] ✅ Done.')
+      } catch (e) {
+        console.warn('[CacheWarmer] ⚠️  Error:', e.message)
+      }
+    }
+
+    // Warm immediately after DB connects, then on a rolling interval
+    warmCache()
+    setInterval(warmCache, 4.5 * 60 * 1000)
+
+    // ── Oracle VM Keepalive ───────────────────────────────────────────────────
+    // Oracle Free Tier throttles idle VMs. Pinging /health every 4 min keeps
+    // the Node process and the ML FastAPI process alive and avoids cold starts.
+    const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`
+    const ML_API_URL  = process.env.ML_API_URL  || 'http://localhost:8000'
+
+    setInterval(() => {
+      fetch(`${BACKEND_URL}/health`).catch(() => {})
+      fetch(`${ML_API_URL}/health`).catch(() => {})
+    }, 4 * 60 * 1000)
+
+    console.log('[Keepalive] ✅ Self-ping scheduled every 4 min.')
   })
   .catch(err => {
     console.error('❌ MongoDB error:', err.message)
