@@ -32,10 +32,12 @@ const promotionSchema = new mongoose.Schema({
   // price. These do NOT control what Stripe actually charges; Stripe charges
   // based on the coupon's real discount amount/percent. Keep these numbers
   // in sync with the coupon so the displayed price matches the real charge.
+  // Same coupon is applied to both billing cycles — only the display price
+  // shown to the user differs by cycle (monthly $/mo vs yearly $/mo billed annually).
   displayPrices: {
-    basic:    { type: Number, default: 0 },
-    gold:     { type: Number, default: 0 },
-    platinum: { type: Number, default: 0 },
+    basic:    { monthly: { type: Number, default: 0 }, yearly: { type: Number, default: 0 } },
+    gold:     { monthly: { type: Number, default: 0 }, yearly: { type: Number, default: 0 } },
+    platinum: { monthly: { type: Number, default: 0 }, yearly: { type: Number, default: 0 } },
   },
 
   updatedAt: { type: Date, default: Date.now },
