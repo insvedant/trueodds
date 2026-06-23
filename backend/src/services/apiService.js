@@ -7,7 +7,7 @@ const ODDS_BASE     = 'https://api.the-odds-api.com/v4'
 const SPORTSDB_BASE = 'https://www.thesportsdb.com/api/v1/json/3'
 
 const TTL = {
-  ODDS:      5  * 60,          // 5 minutes (was 1 min — was burning quota fast)
+  ODDS:      5  * 60,          // 5 minutes
   SCORES:    10 * 60,          // 10 minutes
   TEAM_META: 24 * 60 * 60,    // 24 hours
 }
@@ -55,6 +55,35 @@ let quotaState = {
   lastCheck: null,
 }
 
+// ─── L1 In-Memory Cache ───────────────────────────────────────────────────────
+// Sits in front of MongoDB so hot keys are served from RAM in microseconds,
+// avoiding 30+ MongoDB round-trips on every getAllOdds() warm hit.
+const _memCache = new Map() // key → { data, expiresAt }
+
+function memGet(key) {
+  const entry = _memCache.get(key)
+  if (!entry) return null
+  if (entry.expiresAt <= Date.now()) { _memCache.delete(key); return null }
+  return entry.data
+}
+
+function memSet(key, data, ttlSeconds) {
+  _memCache.set(key, { data, expiresAt: Date.now() + ttlSeconds * 1000 })
+}
+
+function memDel(key) {
+  // Support prefix deletion (e.g. clear all 'odds:*' keys)
+  if (key.endsWith('*')) {
+    const prefix = key.slice(0, -1)
+    for (const k of _memCache.keys()) {
+      if (k.startsWith(prefix)) _memCache.delete(k)
+    }
+  } else {
+    _memCache.delete(key)
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 function isKeyConfigured() {
   return ODDS_API_KEY &&
          !ODDS_API_KEY.includes('REPLACE') &&
@@ -67,7 +96,6 @@ async function fetchJSON(url, headers = {}) {
     signal: AbortSignal.timeout(10_000),
   })
 
-  
   const remaining = res.headers.get('x-requests-remaining')
   const used      = res.headers.get('x-requests-used')
   if (remaining !== null) {
@@ -75,7 +103,6 @@ async function fetchJSON(url, headers = {}) {
     quotaState.remaining = parseInt(remaining)
     quotaState.used      = parseInt(used || '0')
     quotaState.lastCheck = new Date()
-    // Only log when quota is low or drops by 1000+ (not every single call)
     const dropped = prev - quotaState.remaining
     if (quotaState.remaining < 500000 || dropped >= 1000) {
       console.log(`[TheOddsAPI] Remaining: ${remaining} | Used: ${used}`)
@@ -91,9 +118,15 @@ async function fetchJSON(url, headers = {}) {
 }
 
 async function getSports() {
-  const key     = 'sports:list'
-  const cached  = await Cache.get(key)
-  if (cached) return { data: cached, source: 'cache' }
+  const key = 'sports:list'
+
+  // L1
+  const mem = memGet(key)
+  if (mem) return { data: mem, source: 'mem' }
+
+  // L2
+  const cached = await Cache.get(key)
+  if (cached) { memSet(key, cached, TTL.TEAM_META); return { data: cached, source: 'cache' } }
 
   if (!isKeyConfigured()) return { data: getMockSports(), source: 'mock' }
 
@@ -101,13 +134,20 @@ async function getSports() {
     `${ODDS_BASE}/sports?apiKey=${ODDS_API_KEY}&all=true`
   )
   await Cache.set(key, data, TTL.TEAM_META, 'api')
+  memSet(key, data, TTL.TEAM_META)
   return { data, source: 'api' }
 }
 
 async function getOdds(sport = 'americanfootball_nfl', market = 'h2h') {
-  const key    = `odds:${sport}:${market}`
+  const key = `odds:${sport}:${market}`
+
+  // L1
+  const mem = memGet(key)
+  if (mem) return { data: mem, source: 'mem' }
+
+  // L2
   const cached = await Cache.get(key)
-  if (cached) return { data: cached, source: 'cache' }
+  if (cached) { memSet(key, cached, TTL.ODDS); return { data: cached, source: 'cache' } }
 
   if (!isKeyConfigured()) return { data: [], source: 'mock' }
 
@@ -121,21 +161,26 @@ async function getOdds(sport = 'americanfootball_nfl', market = 'h2h') {
 
   const raw  = await fetchJSON(url)
   const data = transformOdds(raw, sport, market)
-  // Only cache if we got actual data — don't cache empty results
   if (data && data.length > 0) {
     await Cache.set(key, data, TTL.ODDS, 'api')
+    memSet(key, data, TTL.ODDS)
   }
   return { data: data || [], source: 'api' }
 }
 
 async function getAllOdds() {
-  const key    = 'odds:all'
+  const key = 'odds:all'
+
+  // L1
+  const mem = memGet(key)
+  if (mem) return { data: mem, source: 'mem' }
+
+  // L2
   const cached = await Cache.get(key)
-  if (cached) return { data: cached, source: 'cache' }
+  if (cached) { memSet(key, cached, TTL.ODDS); return { data: cached, source: 'cache' } }
 
   if (!isKeyConfigured()) return { data: [], source: 'mock' }
 
-  // Football/hockey get spreads too — more books post spread lines = more arb
   const SPREAD_SPORTS = ['americanfootball_cfl','americanfootball_nfl','icehockey_nhl']
 
   const fetches = []
@@ -148,7 +193,6 @@ async function getAllOdds() {
 
   const results = await Promise.allSettled(fetches)
 
-  // Merge by game id so spread + h2h markets combine into one game object
   const gameMap = {}
   for (const res of results) {
     if (res.status !== 'fulfilled' || !res.value.data || !res.value.data.length) continue
@@ -165,27 +209,32 @@ async function getAllOdds() {
 
   if (combined.length > 0) {
     await Cache.set(key, combined, TTL.ODDS, 'api')
+    memSet(key, combined, TTL.ODDS)
     return { data: combined, source: 'api' }
   }
   return { data: [], source: 'empty' }
 }
 
 async function getArbitrage(minProfit = 0, sport = null) {
-  const key    = `arb:${sport || 'all'}:${minProfit}`
+  const key = `arb:${sport || 'all'}:${minProfit}`
+
+  // L1
+  const mem = memGet(key)
+  if (mem) return { data: mem, source: 'mem' }
+
+  // L2
   const cached = await Cache.get(key)
-  if (cached) return { data: cached, source: 'cache' }
+  if (cached) { memSet(key, cached, TTL.ODDS); return { data: cached, source: 'cache' } }
 
   let odds = []
   let source = 'api'
 
   if (sport) {
     const sportKey = getSportKey(sport)
-    // For hockey and football fetch both h2h and spreads for more arb opportunities
     const markets = ['NHL','CFL','NFL'].includes(sport) ? ['h2h','spreads'] : ['h2h']
     const results = await Promise.allSettled(markets.map(m => getOdds(sportKey, m)))
     for (const r of results) {
       if (r.status === 'fulfilled' && r.value.data?.length) {
-        // Merge markets from same games
         for (const game of r.value.data) {
           const existing = odds.find(g => g.id === game.id)
           if (existing) {
@@ -206,14 +255,21 @@ async function getArbitrage(minProfit = 0, sport = null) {
   const arbs = calcArbitrage(odds, minProfit)
   if (arbs.length > 0) {
     await Cache.set(key, arbs, TTL.ODDS, source)
+    memSet(key, arbs, TTL.ODDS)
   }
   return { data: arbs, source }
 }
 
 async function getPositiveEV(minEV = 0, sport = null) {
-  const key    = `ev:${sport || 'all'}:${minEV}`
+  const key = `ev:${sport || 'all'}:${minEV}`
+
+  // L1
+  const mem = memGet(key)
+  if (mem) return { data: mem, source: 'mem' }
+
+  // L2
   const cached = await Cache.get(key)
-  if (cached) return { data: cached, source: 'cache' }
+  if (cached) { memSet(key, cached, TTL.ODDS); return { data: cached, source: 'cache' } }
 
   const { data: odds, source } = sport
     ? await getOdds(getSportKey(sport), 'h2h')
@@ -222,14 +278,21 @@ async function getPositiveEV(minEV = 0, sport = null) {
   const evBets = calcEV(odds, minEV)
   if (evBets.length > 0) {
     await Cache.set(key, evBets, TTL.ODDS, source)
+    memSet(key, evBets, TTL.ODDS)
   }
   return { data: evBets, source }
 }
 
 async function getScores(sport = 'NBA') {
-  const key    = `scores:${sport}`
+  const key = `scores:${sport}`
+
+  // L1
+  const mem = memGet(key)
+  if (mem) return { data: mem, source: 'mem' }
+
+  // L2
   const cached = await Cache.get(key)
-  if (cached) return { data: cached, source: 'cache' }
+  if (cached) { memSet(key, cached, TTL.SCORES); return { data: cached, source: 'cache' } }
 
   if (!isKeyConfigured()) return { data: [], source: 'mock' }
 
@@ -249,13 +312,20 @@ async function getScores(sport = 'NBA') {
   }))
 
   await Cache.set(key, data, TTL.SCORES, 'api')
+  memSet(key, data, TTL.SCORES)
   return { data, source: 'api' }
 }
 
 async function getTeamLogo(teamName) {
-  const key    = `team:${teamName.toLowerCase().replace(/\s/g, '_')}`
+  const key = `team:${teamName.toLowerCase().replace(/\s/g, '_')}`
+
+  // L1
+  const mem = memGet(key)
+  if (mem) return mem
+
+  // L2
   const cached = await Cache.get(key)
-  if (cached) return cached
+  if (cached) { memSet(key, cached, TTL.TEAM_META); return cached }
 
   try {
     const data = await fetchJSON(
@@ -268,6 +338,7 @@ async function getTeamLogo(teamName) {
       league: team?.strLeague || null,
     }
     await Cache.set(key, result, TTL.TEAM_META, 'api')
+    memSet(key, result, TTL.TEAM_META)
     return result
   } catch {
     return { name: teamName, logo: null }
@@ -283,6 +354,13 @@ function getQuotaInfo() {
     plan:                isKeyConfigured() ? 'paid' : 'unconfigured',
     cacheTTL_seconds:    TTL.ODDS,
   }
+}
+
+// Expose cache invalidation so the /refresh route can also bust L1
+function bustMemCache(prefix = 'odds:*') {
+  memDel(prefix)
+  memDel('arb:*')
+  memDel('ev:*')
 }
 
 const SPORT_LABELS = {
@@ -304,7 +382,6 @@ const SPORT_LABELS = {
   soccer_usa_mls:                         'Soccer',
   soccer_canada_cpl:                      'Soccer',
   soccer_fifa_world_cup:                  'Soccer',
-  americanfootball_cfl:                   'CFL',
   icehockey_ahl:                          'AHL',
   mma_mixed_martial_arts:                 'UFC',
   boxing_boxing:                          'Boxing',
@@ -325,8 +402,6 @@ function transformOdds(games, sportKey, market) {
     .filter(game => {
       if (!game.commence_time) return true
       const gameTime = new Date(game.commence_time).getTime()
-      // For EV/arb calculations only show games starting within next 7 days
-      // or already started within last 3 hours (live)
       return gameTime >= now - 3 * 60 * 60 * 1000
     })
     .map(game => {
@@ -385,7 +460,6 @@ function calcArbitrage(games, minProfit = 0) {
 
   for (const game of games) {
     for (const mkt of game.markets || []) {
-      
       const best = {}
       for (const row of mkt.rows || []) {
         const bestNum = parseInt(row.bestOdds) || 0
@@ -473,7 +547,7 @@ function calcEV(games, minEV = 0) {
           const bookDec = dec(bookOdds)
           const ev      = (trueProb * bookDec - 1) * 100
           if (ev < minEV) continue
-          if (ev > 30) continue  // Skip unrealistic values — indicates stale/mismatched odds
+          if (ev > 30) continue
 
           const b     = bookDec - 1
           const q     = 1 - trueProb
@@ -506,7 +580,6 @@ function getSportKey(label) {
   const map = {
     NFL:    'americanfootball_nfl',
     CFL:    'americanfootball_cfl',
-    CFL:    'americanfootball_cfl',
     NBA:    'basketball_nba',
     MLB:    'baseball_mlb',
     NHL:    'icehockey_nhl',
@@ -521,7 +594,6 @@ function getSportKey(label) {
 function getMockSports() {
   return [
     { key: 'americanfootball_nfl',    title: 'NFL',          active: true },
-    { key: 'americanfootball_cfl',    title: 'CFL',          active: true },
     { key: 'americanfootball_cfl',    title: 'CFL',          active: true },
     { key: 'basketball_nba',          title: 'NBA',          active: true },
     { key: 'baseball_mlb',            title: 'MLB',          active: true },
@@ -544,4 +616,5 @@ module.exports = {
   getQuotaInfo,
   getSportKey,
   isKeyConfigured,
+  bustMemCache,
 }
