@@ -67,10 +67,14 @@ router.put('/', protect, adminOnly, async (req, res) => {
       }
     }
     if (displayPrices && typeof displayPrices === 'object') {
+      const merge = (planKey) => ({
+        monthly: displayPrices[planKey]?.monthly ?? promo.displayPrices[planKey]?.monthly ?? 0,
+        yearly:  displayPrices[planKey]?.yearly  ?? promo.displayPrices[planKey]?.yearly  ?? 0,
+      })
       promo.displayPrices = {
-        basic:    displayPrices.basic    ?? promo.displayPrices.basic,
-        gold:     displayPrices.gold     ?? promo.displayPrices.gold,
-        platinum: displayPrices.platinum ?? promo.displayPrices.platinum,
+        basic:    merge('basic'),
+        gold:     merge('gold'),
+        platinum: merge('platinum'),
       }
     }
 
