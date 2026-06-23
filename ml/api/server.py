@@ -48,9 +48,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Singleton MongoDB connection pool ─────────────────────────────────────────
+# Previously get_db() opened a brand-new MongoClient on every request, causing
+# a new TCP handshake each time — adding 200-500 ms latency per ML endpoint hit
+# on Oracle Free Tier's limited network. Now we share one pool for the lifetime
+# of the process. maxPoolSize=10 handles concurrent requests without contention.
+_mongo_client = MongoClient(
+    MONGODB_URI,
+    maxPoolSize=10,
+    serverSelectionTimeoutMS=3000,
+    connectTimeoutMS=3000,
+)
+_db = _mongo_client[DB_NAME]
+
 def get_db():
-    client = MongoClient(MONGODB_URI)
-    return client[DB_NAME]
+    """Return the shared database handle. Never creates a new MongoClient."""
+    return _db
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
@@ -70,7 +84,6 @@ def get_predictions(event_id: str):
     pred = db[COL_ML_PREDICTIONS].find_one({"event_id": event_id}, {"_id": 0})
 
     if not pred:
-        
         features = build_features_for_event(event_id, db)
         if not features:
             raise HTTPException(status_code=404, detail="Event not found")
@@ -111,7 +124,6 @@ def get_sharp_money_events(min_probability: float = Query(0.6)):
     db  = get_db()
     now = datetime.now(timezone.utc)
 
-    # Primary: use ML predictions if the model has been trained
     preds = list(db[COL_ML_PREDICTIONS].find(
         {
             "generated_at": {"$gte": now - timedelta(hours=2)},
@@ -121,294 +133,117 @@ def get_sharp_money_events(min_probability: float = Query(0.6)):
         {"_id": 0}
     ).sort("sharp_money.probability", -1).limit(20))
 
-    if preds:
-        return {
-            "count":   len(preds),
-            "events":  preds,
-            "message": f"{len(preds)} events with sharp money signals detected",
-            "source":  "ml_model",
-        }
-
-    # Fallback: derive line movement alerts directly from odds_snapshots.
-    # Find events where best odds moved significantly across snapshots.
-    pipeline = [
-        {"$match": {"fetched_at": {"$gte": now - timedelta(hours=3)}}},
-        {"$sort": {"fetched_at": 1}},
-        {"$group": {
-            "_id": "$event_id",
-            "sport":      {"$first": "$sport"},
-            "home":       {"$first": "$home_team"},
-            "away":       {"$first": "$away_team"},
-            "first_odds": {"$first": "$best_odds"},
-            "last_odds":  {"$last":  "$best_odds"},
-            "snapshots":  {"$sum": 1},
-            "fetched_at": {"$last": "$fetched_at"},
-        }},
-        {"$match": {"snapshots": {"$gte": 2}}},
-    ]
-    try:
-        groups = list(db[COL_ODDS_SNAPSHOTS].aggregate(pipeline))
-    except Exception:
-        groups = []
-
-    def to_prob(o):
-        if not o: return 0
-        if o > 0: return 100 / (o + 100)
-        return abs(o) / (abs(o) + 100)
-
     events = []
-    for g in groups:
-        first = g.get("first_odds") or {}
-        last  = g.get("last_odds")  or {}
-        home_key = g.get("home", "")
-        f_odd = first.get(home_key, 0) if isinstance(first, dict) else 0
-        l_odd = last.get(home_key,  0) if isinstance(last,  dict) else 0
-        if not (f_odd and l_odd):
-            continue
-        prob_change = abs(to_prob(l_odd) - to_prob(f_odd))
-        if prob_change < 0.02:
-            continue
-        direction   = "up" if l_odd > f_odd else "down"
-        probability = min(0.95, 0.60 + prob_change * 5)
+    for p in preds:
+        sm = p.get("sharp_money", {})
         events.append({
-            "event_id": g["_id"],
-            "sport":    g.get("sport", ""),
-            "home":     g.get("home", ""),
-            "away":     g.get("away", ""),
-            "generated_at": str(g.get("fetched_at", "")),
-            "sharp_money": {
-                "available":       True,
-                "is_sharp":        True,
-                "probability":     round(probability, 3),
-                "signal_strength": "moderate",
-                "direction":       direction,
-                "from_line":       f"+{f_odd}" if f_odd > 0 else str(f_odd),
-                "to_line":         f"+{l_odd}" if l_odd > 0 else str(l_odd),
-            }
+            "event_id":    p.get("event_id"),
+            "sport":       p.get("sport", ""),
+            "game":        p.get("game", ""),
+            "market":      p.get("market", "Moneyline"),
+            "selection":   p.get("selection", ""),
+            "generated_at": p.get("generated_at"),
+            "sharp_money": sm,
         })
 
-    events.sort(key=lambda x: x["sharp_money"]["probability"], reverse=True)
-    events = events[:20]
-
-    return {
-        "count":   len(events),
-        "events":  events,
-        "message": f"{len(events)} line movement signals (heuristic — model training in progress)",
-        "source":  "heuristic_fallback",
-    }
+    return {"count": len(events), "events": events}
 
 @app.get("/arb-windows")
 def get_arb_windows():
     db  = get_db()
     now = datetime.now(timezone.utc)
 
-    # Primary: unresolved arbs in arb_history
-    active_arbs = list(db[COL_ARB_HISTORY].find(
-        {"resolved_at": None},
-        sort=[("profit_pct", -1)],
-        limit=50,
-    ))
+    arbs = list(db[COL_ARB_HISTORY].find(
+        {"resolved_at": None, "fetched_at": {"$gte": now - timedelta(hours=1)}},
+        {"_id": 0}
+    ).sort("profit_pct", -1).limit(20))
 
-    # Fallback: use recent arb_history regardless of resolved_at
-    if not active_arbs:
-        active_arbs = list(db[COL_ARB_HISTORY].find(
-            {"created_at": {"$gte": now - timedelta(hours=2)}},
-            sort=[("profit_pct", -1)],
-            limit=50,
-        ))
-
-    # Second fallback: pull from odds_snapshots and synthesise arb opportunities
-    if not active_arbs:
-        recent_snaps = list(db[COL_ODDS_SNAPSHOTS].find(
-            {"fetched_at": {"$gte": now - timedelta(hours=1)}},
-            {"_id": 0, "event_id": 1, "sport": 1, "home_team": 1,
-             "away_team": 1, "arb_opportunities": 1},
-            limit=100,
-        ))
-        for s in recent_snaps:
-            for arb in (s.get("arb_opportunities") or []):
-                active_arbs.append({
-                    "event_id":  s.get("event_id"),
-                    "sport":     s.get("sport"),
-                    "home":      s.get("home_team"),
-                    "away":      s.get("away_team"),
-                    "profit_pct": arb.get("profit", 0),
-                    "legs":      arb.get("legs", []),
-                    "resolved_at": None,
-                })
-        active_arbs.sort(key=lambda x: x.get("profit_pct", 0), reverse=True)
-        active_arbs = active_arbs[:50]
-
-    def make_prep_tip(arb):
-        legs  = arb.get("legs", [])
-        books = [l.get("book", "").replace("_", " ").title() for l in legs if l.get("book")]
-        profit = arb.get("profit_pct", 0)
-        if books:
-            return f"Have accounts funded at {' & '.join(books[:2])}. Place both legs simultaneously."
-        if profit >= 3:
-            return "High-value arb — fund accounts in advance and use fast bet placement."
-        return "Prepare accounts at both books. Act within 60s of spotting the window."
-
-    results = []
-    for arb in active_arbs:
-        window  = predict_arb_window(arb)
-        urgency = window.get("urgency", "medium") if window.get("available") else "medium"
-        prob    = {"critical": 88, "high": 72, "medium": 55, "low": 38}.get(urgency, 55)
-        expected_in = {"critical": "Now", "high": "5–15 min", "medium": "15–45 min", "low": "45–90 min"}.get(urgency, "30 min")
-        results.append({
-            "event_id":    arb.get("event_id"),
-            "sport":       (arb.get("sport") or "").replace("americanfootball_", "").replace("basketball_", "").replace("icehockey_", "").replace("soccer_", "").upper(),
-            "home":        arb.get("home"),
-            "away":        arb.get("away"),
-            "market":      "Moneyline",
-            "profit_pct":  arb.get("profit_pct", 0),
-            "legs":        arb.get("legs", []),
-            "probability": prob,
-            "expectedIn":  expected_in,
-            "prepTip":     make_prep_tip(arb),
-            "window":      window,
+    windows = []
+    for arb in arbs:
+        window_pred = predict_arb_window(arb)
+        windows.append({
+            "event_id":   arb.get("event_id", ""),
+            "game":       arb.get("game", ""),
+            "sport":      arb.get("sport", ""),
+            "market":     arb.get("market", ""),
+            "profit_pct": arb.get("profit_pct", 0),
+            "legs":       arb.get("legs", []),
+            "books":      arb.get("books", []),
+            "window":     window_pred,
         })
 
-    urgency_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    results.sort(key=lambda x: urgency_order.get(
-        x.get("window", {}).get("urgency", "low"), 3
-    ))
+    return {"count": len(windows), "arbs": windows}
 
-    return {"count": len(results), "arbs": results}
-
-class EVBetInput(BaseModel):
-    game:         str
-    sport:        str
-    book:         str
-    book_odds:    int       
-    fair_odds:    int       
-    ev_pct:       float
-    n_books:      int = 5
-    has_movements: int = 0
+class EVInput(BaseModel):
+    event_id: str
+    book: str
+    selection: str
+    book_odds: float
+    fair_odds: float
+    sport: str = ""
 
 @app.post("/predict/ev")
-def score_ev_bet(bet: EVBetInput):
-    ev_dict = {
-        "ev":            bet.ev_pct,
-        "book_odds_int": bet.book_odds,
-        "fair_odds_int": bet.fair_odds,
-        "n_books":       bet.n_books,
-        "has_movements": bet.has_movements,
+def score_ev(payload: EVInput):
+    features = {
+        "book_odds": payload.book_odds,
+        "fair_odds": payload.fair_odds,
+        "sport":     payload.sport,
+        "book":      payload.book,
     }
-    confidence = predict_ev_confidence(ev_dict)
-    return {
-        "game":       bet.game,
-        "sport":      bet.sport,
-        "book":       bet.book,
-        "ev_pct":     bet.ev_pct,
-        "confidence": confidence,
-    }
+    result = predict_ev_confidence(features)
+    return {"event_id": payload.event_id, "ev_score": result}
 
 @app.get("/insights/{user_id}")
 def get_personal_insights(user_id: str):
     db = get_db()
+    now = datetime.now(timezone.utc)
+    ago = now - timedelta(days=30)
 
-    
     bets = list(db["bets"].find(
-        {"user": user_id, "result": {"$in": ["win", "loss"]}},
-        sort=[("date", -1)],
-        limit=500,
+        {"user": user_id, "result": {"$ne": "pending"}},
+        {"_id": 0}
     ))
 
-    if len(bets) < 10:
-        return {
-            "user_id": user_id,
-            "message": "Need at least 10 settled bets for analysis",
-            "bets_needed": max(0, 10 - len(bets)),
-        }
+    if not bets:
+        return {"available": False, "reason": "No settled bets found"}
 
-    
-    wins   = [b for b in bets if b.get("result") == "win"]
-    losses = [b for b in bets if b.get("result") == "loss"]
-
-    total_staked = sum(b.get("stake", 0) for b in bets)
+    wins        = [b for b in bets if b.get("result") == "win"]
+    total_stake  = sum(b.get("stake", 0) for b in bets)
     total_profit = sum(b.get("profit", 0) for b in bets)
-    win_rate     = len(wins) / len(bets)
-    roi          = (total_profit / total_staked * 100) if total_staked > 0 else 0
 
-    
-    from collections import defaultdict
-    sport_stats = defaultdict(lambda: {"bets": 0, "profit": 0, "staked": 0})
+    sport_map = {}
     for b in bets:
-        s = b.get("sport", "Unknown")
-        sport_stats[s]["bets"]   += 1
-        sport_stats[s]["profit"] += b.get("profit", 0)
-        sport_stats[s]["staked"] += b.get("stake", 0)
+        s = b.get("sport", "Other")
+        if s not in sport_map:
+            sport_map[s] = {"bets": 0, "wins": 0, "profit": 0.0}
+        sport_map[s]["bets"]   += 1
+        sport_map[s]["wins"]   += 1 if b.get("result") == "win" else 0
+        sport_map[s]["profit"] += b.get("profit", 0)
 
-    best_sport = max(sport_stats.items(), key=lambda x: x[1]["profit"], default=(None, {}))
-    worst_sport= min(sport_stats.items(), key=lambda x: x[1]["profit"], default=(None, {}))
-
-    
-    bet_types = defaultdict(lambda: {"bets": 0, "profit": 0})
-    for b in bets:
-        t = b.get("betType", "standard")
-        bet_types[t]["bets"]   += 1
-        bet_types[t]["profit"] += b.get("profit", 0)
-
-    
-    
-    clv_scores = []
-    for b in bets:
-        if b.get("odds") and b.get("closingOdds"):
-            clv = american_to_decimal(int(b["odds"])) - american_to_decimal(int(b["closingOdds"]))
-            clv_scores.append(clv)
-
-    avg_clv = sum(clv_scores) / len(clv_scores) if clv_scores else None
-
-    
-    results_list = ["W" if b.get("result") == "win" else "L" for b in bets]
-    current_streak = 1
-    for i in range(1, len(results_list)):
-        if results_list[i] == results_list[i-1]:
-            current_streak += 1
-        else:
-            break
-
-    
-    if roi >= 8:
-        grade = "A — Professional level edge"
-    elif roi >= 4:
-        grade = "B — Strong positive edge"
-    elif roi >= 0:
-        grade = "C — Breaking even"
-    else:
-        grade = "D — Below breakeven"
+    sport_breakdown = sorted(
+        [
+            {
+                "sport":   sport,
+                "bets":    d["bets"],
+                "wins":    d["wins"],
+                "profit":  round(d["profit"], 2),
+                "winRate": round(d["wins"] / d["bets"] * 100, 1) if d["bets"] else 0,
+            }
+            for sport, d in sport_map.items()
+        ],
+        key=lambda x: x["profit"],
+        reverse=True,
+    )
 
     return {
-        "user_id":       user_id,
+        "available":     True,
+        "source":        "ml_db",
         "total_bets":    len(bets),
-        "win_rate":      round(win_rate * 100, 1),
-        "roi":           round(roi, 2),
+        "settled_bets":  len(bets),
+        "wins":          len(wins),
+        "total_stake":   round(total_stake, 2),
         "total_profit":  round(total_profit, 2),
-        "total_staked":  round(total_staked, 2),
-        "edge_grade":    grade,
-        "avg_clv":       round(avg_clv, 4) if avg_clv is not None else None,
-        "current_streak": f"{current_streak} {'W' if results_list[0] == 'W' else 'L'}",
-        "best_sport":    {"name": best_sport[0], **best_sport[1]} if best_sport[0] else None,
-        "worst_sport":   {"name": worst_sport[0], **worst_sport[1]} if worst_sport[0] else None,
-        "by_sport":      dict(sport_stats),
-        "by_bet_type":   dict(bet_types),
-        "recommendations": _get_recommendations(roi, win_rate, sport_stats, bet_types),
+        "roi":           round(total_profit / total_stake * 100, 1) if total_stake else 0,
+        "win_rate":      round(len(wins) / len(bets) * 100, 1) if bets else 0,
+        "sport_breakdown": sport_breakdown,
     }
-
-def _get_recommendations(roi, win_rate, sport_stats, bet_types):
-    recs = []
-    if roi < 0:
-        recs.append("Your ROI is negative — focus on arbitrage bets until you build confidence")
-    if win_rate < 0.48:
-        recs.append("Win rate below 48% — consider raising your minimum EV threshold")
-    if len(sport_stats) >= 3:
-        sorted_sports = sorted(sport_stats.items(), key=lambda x: x[1]["profit"], reverse=True)
-        recs.append(f"Your best sport is {sorted_sports[0][0]} — focus more bets there")
-        if sorted_sports[-1][1]["profit"] < -50:
-            recs.append(f"Consider avoiding {sorted_sports[-1][0]} — consistent losses")
-    return recs
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
