@@ -29,32 +29,34 @@ from ml.config import (
     COL_ODDS_SNAPSHOTS, COL_LINE_MOVEMENTS, COL_ARB_HISTORY,
 )
 
-
 def get_db():
     client = MongoClient(MONGODB_URI)
     return client[DB_NAME]
 
-
 def setup_indexes(db):
     """Create MongoDB indexes for efficient ML queries."""
-    # Odds snapshots: query by sport, event, time
+    
     db[COL_ODDS_SNAPSHOTS].create_index([
         ("sport", ASCENDING), ("event_id", ASCENDING), ("fetched_at", DESCENDING)
     ])
     db[COL_ODDS_SNAPSHOTS].create_index([("fetched_at", DESCENDING)])
+    # Supports the dedup-aware opening-line / feature-building queries that
+    # filter on is_duplicate alongside event_id + fetched_at.
+    db[COL_ODDS_SNAPSHOTS].create_index([
+        ("event_id", ASCENDING), ("is_duplicate", ASCENDING), ("fetched_at", ASCENDING)
+    ])
 
-    # Line movements: query by event + book + time
+    
     db[COL_LINE_MOVEMENTS].create_index([
         ("event_id", ASCENDING), ("book", ASCENDING), ("timestamp", DESCENDING)
     ])
 
-    # Arb history: query by sport + profit
+    
     db[COL_ARB_HISTORY].create_index([
         ("sport", ASCENDING), ("profit_pct", DESCENDING), ("detected_at", DESCENDING)
     ])
 
     logger.info("MongoDB indexes created")
-
 
 def american_to_decimal(american: int) -> float:
     if american >= 100:
@@ -63,11 +65,9 @@ def american_to_decimal(american: int) -> float:
         return (100 / abs(american)) + 1
     return 1.0
 
-
 def implied_prob(american: int) -> float:
     dec = american_to_decimal(american)
     return 1 / dec if dec > 0 else 0
-
 
 def no_vig_prob(odds_list: list) -> list:
     """Remove vig from a list of American odds, return true probabilities."""
@@ -79,6 +79,16 @@ def no_vig_prob(odds_list: list) -> list:
         return raw_probs
     return [p / total for p in raw_probs]
 
+def book_odds_unchanged(prev: dict | None, book_odds: dict) -> bool:
+    """
+    Exact comparison of the previous snapshot's book_odds against the
+    current one. American odds are integers, so this is an exact dict
+    comparison — no floating point tolerance needed.
+    Returns True only if every market/selection/book price is identical.
+    """
+    if not prev:
+        return False
+    return prev.get("book_odds", {}) == book_odds
 
 async def fetch_odds_for_sport(sport: str, client: httpx.AsyncClient) -> list:
     """Fetch h2h odds for a sport from TheOddsAPI."""
@@ -107,7 +117,6 @@ async def fetch_odds_for_sport(sport: str, client: httpx.AsyncClient) -> list:
     except Exception as e:
         logger.error(f"Failed to fetch odds for {sport}: {e}")
         return []
-
 
 def extract_book_odds(game: dict) -> dict:
     """
@@ -144,22 +153,17 @@ def extract_book_odds(game: dict) -> dict:
 
     return result
 
-
-def detect_line_movement(db, event_id: str, sport: str, book_odds: dict, now: datetime) -> list:
+def detect_line_movement(prev: dict | None, event_id: str, sport: str, book_odds: dict, now: datetime) -> list:
     """
-    Compare current odds to previous snapshot.
+    Compare current odds to a previously-fetched snapshot document.
+    `prev` is passed in by the caller (already fetched once in
+    collect_snapshot) so we don't hit Mongo twice per game per cycle.
     Returns list of line movement events for storage.
     """
     movements = []
 
-    # Get previous snapshot for this event
-    prev = db[COL_ODDS_SNAPSHOTS].find_one(
-        {"event_id": event_id},
-        sort=[("fetched_at", DESCENDING)]
-    )
-
     if not prev:
-        return movements  # first snapshot, no movement to detect
+        return movements  
 
     prev_book_odds = prev.get("book_odds", {})
 
@@ -174,7 +178,7 @@ def detect_line_movement(db, event_id: str, sport: str, book_odds: dict, now: da
                 if prev_odds is None or prev_odds == current_odds:
                     continue
 
-                # Line moved — record it
+                
                 is_sharp = book in SHARP_BOOKS
                 movement = {
                     "event_id":    event_id,
@@ -189,16 +193,15 @@ def detect_line_movement(db, event_id: str, sport: str, book_odds: dict, now: da
                     "prev_prob":   implied_prob(prev_odds),
                     "curr_prob":   implied_prob(current_odds),
                     "prob_change": implied_prob(current_odds) - implied_prob(prev_odds),
-                    "moved_up":    current_odds > prev_odds,   # odds got longer (more value)
+                    "moved_up":    current_odds > prev_odds,   
                     "is_sharp_book": is_sharp,
-                    "minutes_to_game": None,  # filled below if commence_time available
+                    "minutes_to_game": None,  
                     "timestamp":   now,
                     "seconds_since_prev": (now - prev["fetched_at"]).total_seconds(),
                 }
                 movements.append(movement)
 
     return movements
-
 
 def detect_arbitrage(book_odds: dict, event_id: str, sport: str,
                      home: str, away: str, now: datetime) -> list:
@@ -212,7 +215,7 @@ def detect_arbitrage(book_odds: dict, event_id: str, sport: str,
     if not h2h:
         return arbs
 
-    # Find best odds for each side across all books
+    
     best = {}
     for selection, books in h2h.items():
         if not books:
@@ -228,11 +231,11 @@ def detect_arbitrage(book_odds: dict, event_id: str, sport: str,
     implied_sum = sum(1 / s["dec"] for s in selections)
 
     if implied_sum >= 1.0:
-        return arbs  # no arb
+        return arbs  
 
     profit_pct = ((1 - implied_sum) / implied_sum) * 100
 
-    # Optimal stakes on $1000
+    
     stake     = 1000
     legs      = []
     for sel_name, sel_data in best.items():
@@ -255,13 +258,12 @@ def detect_arbitrage(book_odds: dict, event_id: str, sport: str,
         "implied_sum": round(implied_sum, 6),
         "legs":        legs,
         "detected_at": now,
-        "resolved_at": None,           # filled when arb disappears
-        "duration_minutes": None,      # filled when arb resolves
-        "was_profitable": None,        # ground truth for ML training
+        "resolved_at": None,           
+        "duration_minutes": None,      
+        "was_profitable": None,        
     })
 
     return arbs
-
 
 def resolve_old_arbs(db, current_event_ids: set, now: datetime):
     """Mark arbs as resolved when they disappear from the feed."""
@@ -274,12 +276,11 @@ def resolve_old_arbs(db, current_event_ids: set, now: datetime):
         {
             "$set": {
                 "resolved_at": now,
-                "was_profitable": True,  # assumption: arbs that closed were taken
+                "was_profitable": True,  
             },
             "$currentDate": {"updatedAt": True},
         }
     )
-
 
 async def collect_snapshot():
     """Main collection function — fetches all sports and stores to MongoDB."""
@@ -290,9 +291,10 @@ async def collect_snapshot():
 
     async with httpx.AsyncClient() as client:
         current_arb_ids = set()
-        total_games     = 0
-        total_movements = 0
-        total_arbs      = 0
+        total_games      = 0
+        total_duplicates = 0
+        total_movements  = 0
+        total_arbs       = 0
 
         for sport in TRACKED_SPORTS:
             games = await fetch_odds_for_sport(sport, client)
@@ -303,35 +305,65 @@ async def collect_snapshot():
                 away     = game.get("away_team", "")
                 commence = game.get("commence_time", "")
 
-                # Extract structured book odds
+                
                 book_odds = extract_book_odds(game)
 
-                # ── Store odds snapshot ────────────────────────────────
-                snapshot = {
-                    "event_id":      event_id,
-                    "sport":         sport,
-                    "sport_title":   game.get("sport_title", sport),
-                    "home":          home,
-                    "away":          away,
-                    "commence_time": commence,
-                    "book_odds":     book_odds,
-                    "raw_bookmakers": game.get("bookmakers", []),
-                    "fetched_at":    now,
-                }
+                # Fetch the previous snapshot once — reused for both the
+                # dedup check below and detect_line_movement(), instead of
+                # querying Mongo twice per game per cycle.
+                prev = db[COL_ODDS_SNAPSHOTS].find_one(
+                    {"event_id": event_id},
+                    sort=[("fetched_at", DESCENDING)]
+                )
+                unchanged = book_odds_unchanged(prev, book_odds)
+
+                if unchanged:
+                    # Odds identical to the last snapshot — store a tiny
+                    # marker instead of duplicating the full payload
+                    # (no book_odds, no raw_bookmakers). This still satisfies
+                    # every existing fetched_at/event_id query (today's count,
+                    # ml_ready threshold, distinct-events-today for
+                    # predictions) without re-storing unchanged data.
+                    snapshot = {
+                        "event_id":      event_id,
+                        "sport":         sport,
+                        "sport_title":   game.get("sport_title", sport),
+                        "home":          home,
+                        "away":          away,
+                        "commence_time": commence,
+                        "fetched_at":    now,
+                        "is_duplicate":  True,
+                        "duplicate_of":  prev["_id"],
+                    }
+                else:
+                    snapshot = {
+                        "event_id":      event_id,
+                        "sport":         sport,
+                        "sport_title":   game.get("sport_title", sport),
+                        "home":          home,
+                        "away":          away,
+                        "commence_time": commence,
+                        "book_odds":     book_odds,
+                        "raw_bookmakers": game.get("bookmakers", []),
+                        "fetched_at":    now,
+                        "is_duplicate":  False,
+                    }
 
                 db[COL_ODDS_SNAPSHOTS].insert_one(snapshot)
                 total_games += 1
+                if unchanged:
+                    total_duplicates += 1
 
-                # ── Detect and store line movements ────────────────────
-                movements = detect_line_movement(db, event_id, sport, book_odds, now)
+                
+                movements = detect_line_movement(prev, event_id, sport, book_odds, now)
                 if movements:
                     db[COL_LINE_MOVEMENTS].insert_many(movements)
                     total_movements += len(movements)
 
-                # ── Detect and store arbitrage ─────────────────────────
+                
                 arbs = detect_arbitrage(book_odds, event_id, sport, home, away, now)
                 for arb in arbs:
-                    # Check if this arb already exists (avoid duplicates)
+                    
                     existing = db[COL_ARB_HISTORY].find_one({
                         "event_id":   event_id,
                         "resolved_at": None,
@@ -343,26 +375,27 @@ async def collect_snapshot():
 
                     current_arb_ids.add(event_id)
 
-        # Resolve arbs that are no longer in the feed
+        
         resolve_old_arbs(db, current_arb_ids, now)
 
         logger.success(
             f"Collection complete — "
-            f"{total_games} games, "
+            f"{total_games} games ({total_games - total_duplicates} changed, {total_duplicates} unchanged), "
             f"{total_movements} line movements, "
             f"{total_arbs} new arbs"
         )
 
         return {
-            "games":     total_games,
-            "movements": total_movements,
-            "arbs":      total_arbs,
-            "timestamp": now.isoformat(),
+            "games":       total_games,
+            "changed":     total_games - total_duplicates,
+            "duplicates":  total_duplicates,
+            "movements":   total_movements,
+            "arbs":        total_arbs,
+            "timestamp":   now.isoformat(),
         }
 
-
 if __name__ == "__main__":
-    # Run once immediately for testing
+    
     setup_indexes(get_db())
     result = asyncio.run(collect_snapshot())
     print(json.dumps(result, indent=2))
