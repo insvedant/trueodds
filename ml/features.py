@@ -28,11 +28,9 @@ from ml.config import (
     COL_ARB_HISTORY, COL_FEATURE_STORE,
 )
 
-
 def get_db():
     client = MongoClient(MONGODB_URI)
     return client[DB_NAME]
-
 
 def american_to_decimal(odds: float) -> float:
     if odds >= 100:
@@ -40,7 +38,6 @@ def american_to_decimal(odds: float) -> float:
     elif odds <= -100:
         return (100 / abs(odds)) + 1
     return 1.0
-
 
 def build_line_movement_features(event_id: str, db) -> dict:
     """
@@ -59,7 +56,7 @@ def build_line_movement_features(event_id: str, db) -> dict:
             "soft_movements":       0,
             "avg_prob_change":      0.0,
             "max_prob_change":      0.0,
-            "sharp_direction":      0,   # +1 home, -1 away, 0 neutral
+            "sharp_direction":      0,   
             "movement_velocity":    0.0,
             "books_moving_same_dir": 0,
             "steam_detected":       False,
@@ -71,7 +68,7 @@ def build_line_movement_features(event_id: str, db) -> dict:
     sharp_moves = df[df["is_sharp_book"] == True]
     soft_moves  = df[df["is_sharp_book"] == False]
 
-    # Steam detection: multiple books moving in same direction quickly
+    
     if len(df) >= 3:
         last_3 = df.tail(3)
         all_up   = (last_3["moved_up"] == True).all()
@@ -80,7 +77,7 @@ def build_line_movement_features(event_id: str, db) -> dict:
     else:
         steam = False
 
-    # Sharp money direction
+    
     if len(sharp_moves) > 0:
         sharp_up   = (sharp_moves["moved_up"] == True).sum()
         sharp_down = (sharp_moves["moved_up"] == False).sum()
@@ -88,7 +85,7 @@ def build_line_movement_features(event_id: str, db) -> dict:
     else:
         sharp_dir = 0
 
-    # Movement velocity (movements per hour)
+    
     if len(df) >= 2:
         time_span_h = (
             df["timestamp"].max() - df["timestamp"].min()
@@ -109,7 +106,6 @@ def build_line_movement_features(event_id: str, db) -> dict:
         "steam_detected":        steam,
     }
 
-
 def build_cross_book_features(book_odds: dict) -> dict:
     """
     Build features from cross-book odds comparison.
@@ -126,7 +122,7 @@ def build_cross_book_features(book_odds: dict) -> dict:
         dec_list  = [american_to_decimal(o) for o in odds_list]
         prob_list = [1 / d for d in dec_list]
 
-        # Sharp vs soft divergence
+        
         sharp_probs = [
             1 / american_to_decimal(books[b])
             for b in books if b in SHARP_BOOKS
@@ -151,7 +147,7 @@ def build_cross_book_features(book_odds: dict) -> dict:
             f"{prefix}_pinnacle_present":  int("pinnacle" in books),
         })
 
-    # Combined implied probability (vig indicator)
+    
     all_best_probs = []
     for selection, books in h2h.items():
         if books:
@@ -164,7 +160,6 @@ def build_cross_book_features(book_odds: dict) -> dict:
 
     return features
 
-
 def minutes_to_game(commence_time: str) -> float:
     """Calculate minutes until game starts."""
     try:
@@ -175,13 +170,12 @@ def minutes_to_game(commence_time: str) -> float:
     except Exception:
         return -1
 
-
 def build_features_for_event(event_id: str, db) -> dict | None:
     """
     Build complete feature vector for an event.
     Used both for training (historical) and real-time prediction.
     """
-    # Get latest snapshot
+    
     snapshot = db[COL_ODDS_SNAPSHOTS].find_one(
         {"event_id": event_id},
         sort=[("fetched_at", -1)]
@@ -189,9 +183,18 @@ def build_features_for_event(event_id: str, db) -> dict | None:
     if not snapshot:
         return None
 
-    # Get opening snapshot (first ever)
+    # The latest document for this event may be a lightweight "unchanged"
+    # marker (no book_odds — see collect_data.py dedup logic) rather than a
+    # full snapshot. Resolve it back to the real snapshot it points to so
+    # feature building always has actual odds to work with.
+    if snapshot.get("is_duplicate"):
+        real = db[COL_ODDS_SNAPSHOTS].find_one({"_id": snapshot.get("duplicate_of")})
+        if real:
+            snapshot = real
+
+    
     opening = db[COL_ODDS_SNAPSHOTS].find_one(
-        {"event_id": event_id},
+        {"event_id": event_id, "is_duplicate": {"$ne": True}},
         sort=[("fetched_at", 1)]
     )
 
@@ -207,13 +210,13 @@ def build_features_for_event(event_id: str, db) -> dict | None:
         "computed_at":    datetime.now(timezone.utc).isoformat(),
     }
 
-    # Cross-book features
+    
     features.update(build_cross_book_features(book_odds))
 
-    # Line movement features
+    
     features.update(build_line_movement_features(event_id, db))
 
-    # Opening vs current line shift (CLV signal)
+    
     if opening and opening["_id"] != snapshot["_id"]:
         opening_odds = opening.get("book_odds", {})
         h2h_curr = book_odds.get("h2h", {})
@@ -230,7 +233,7 @@ def build_features_for_event(event_id: str, db) -> dict | None:
                     prefix   = sel.lower().replace(" ", "_")[:20]
                     features[f"{prefix}_opening_line_shift"] = float(curr_avg - open_avg)
 
-    # Arb history for this event
+    
     arb_count = db[COL_ARB_HISTORY].count_documents({"event_id": event_id})
     features["arb_count_detected"] = arb_count
 
@@ -242,7 +245,6 @@ def build_features_for_event(event_id: str, db) -> dict | None:
 
     return features
 
-
 def build_training_dataset(db, min_samples: int = 100) -> pd.DataFrame:
     """
     Build full training dataset from all historical events.
@@ -250,10 +252,10 @@ def build_training_dataset(db, min_samples: int = 100) -> pd.DataFrame:
     """
     logger.info("Building training dataset from MongoDB...")
 
-    # Get all unique event IDs
+    
     pipeline = [
         {"$group": {"_id": "$event_id", "count": {"$sum": 1}}},
-        {"$match": {"count": {"$gte": 3}}},  # need at least 3 snapshots
+        {"$match": {"count": {"$gte": 3}}},  
         {"$limit": 10000}
     ]
     events = list(db[COL_ODDS_SNAPSHOTS].aggregate(pipeline))
@@ -271,16 +273,15 @@ def build_training_dataset(db, min_samples: int = 100) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
 
-    # Drop non-numeric columns for ML
+    
     drop_cols = ["event_id", "sport", "home", "away", "computed_at"]
     df = df.drop(columns=[c for c in drop_cols if c in df.columns])
 
-    # Fill missing values
+    
     df = df.fillna(0)
 
     logger.success(f"Training dataset: {len(df)} rows × {len(df.columns)} features")
     return df
-
 
 if __name__ == "__main__":
     db = get_db()
