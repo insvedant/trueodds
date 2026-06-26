@@ -28,11 +28,9 @@ from ml.config import (
 )
 from ml.collect_data import extract_book_odds, detect_arbitrage, american_to_decimal, implied_prob
 
-
 def get_db():
     client = MongoClient(MONGODB_URI)
     return client[DB_NAME]
-
 
 async def fetch_historical_odds(sport: str, date: str, client: httpx.AsyncClient) -> list:
     """
@@ -67,7 +65,6 @@ async def fetch_historical_odds(sport: str, date: str, client: httpx.AsyncClient
         logger.error(f"Historical fetch failed [{sport}] [{date}]: {e}")
         return []
 
-
 async def import_sport_history(sport: str, days_back: int, db):
     """Import historical data for a sport over the last N days."""
     now          = datetime.now(timezone.utc)
@@ -87,7 +84,7 @@ async def import_sport_history(sport: str, days_back: int, db):
                 away      = game.get("away_team", "")
                 commence  = game.get("commence_time", "")
 
-                # Skip if already imported
+                
                 exists = db[COL_ODDS_SNAPSHOTS].find_one({
                     "event_id":   event_id,
                     "fetched_at": {"$gte": target_date - timedelta(hours=12)}
@@ -109,27 +106,27 @@ async def import_sport_history(sport: str, days_back: int, db):
                     "raw_bookmakers": game.get("bookmakers", []),
                     "fetched_at":     target_date,
                     "is_historical":  True,
+                    "is_duplicate":   False,
                 }
 
                 db[COL_ODDS_SNAPSHOTS].insert_one(snapshot)
                 total_stored += 1
 
-                # Compute and store arb opportunities from historical data
+                
                 arbs = detect_arbitrage(book_odds, event_id, sport, home, away, target_date)
                 for arb in arbs:
-                    # For historical data, mark as resolved immediately
+                    
                     arb["resolved_at"]     = target_date
                     arb["was_profitable"]  = True
-                    arb["duration_minutes"] = None  # unknown from single snapshot
+                    arb["duration_minutes"] = None  
                     arb["is_historical"]   = True
                     db["arb_history"].insert_one(arb)
 
-            # Paid plan — no throttle needed between sports
+            
             await asyncio.sleep(0.1)
 
     logger.success(f"[{sport}] Imported {total_stored} snapshots, skipped {skipped} duplicates")
     return total_stored
-
 
 async def import_all_sports(days_back: int):
     """Import historical data for all tracked sports."""
@@ -151,7 +148,6 @@ async def import_all_sports(days_back: int):
         f"{total} total snapshots in {elapsed:.1f}s"
     )
     return total
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Import historical odds data")
