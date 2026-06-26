@@ -40,32 +40,27 @@ from ml.features import build_features_for_event, american_to_decimal
 
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# ── Scaling constants ─────────────────────────────────────────────────────
-ROLLING_DAYS    = 30       # only train on last 30 days of data
-MAX_SAMPLES     = 50_000   # cap at 50k rows — random sample if exceeded
+ROLLING_DAYS    = 30       
+MAX_SAMPLES     = 50_000   
 RANDOM_STATE    = 42
 
-# ── CI fast mode — fewer estimators on GitHub Actions free runners ────────
 CI_MODE             = os.environ.get('CI_TRAINING', '').lower() == 'true'
 N_ESTIMATORS_LARGE  = 50  if CI_MODE else 150
 N_ESTIMATORS_MEDIUM = 30  if CI_MODE else 100
-N_JOBS              = -1  # use ALL available CPU cores
+N_JOBS              = -1  
 
 logger.info(f"Training mode : {'CI-FAST' if CI_MODE else 'FULL'}")
 logger.info(f"Rolling window: last {ROLLING_DAYS} days")
 logger.info(f"Max samples   : {MAX_SAMPLES:,}")
 logger.info(f"n_jobs        : {N_JOBS} (all cores)")
 
-
 def get_db():
     client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=10_000)
     return client[DB_NAME]
 
-
 def cutoff_date() -> datetime:
     """Return the rolling window cutoff — only data newer than this is used."""
     return datetime.now(timezone.utc) - timedelta(days=ROLLING_DAYS)
-
 
 def sample_if_large(X: pd.DataFrame, y: pd.Series, max_rows: int = MAX_SAMPLES):
     """Randomly sample down to max_rows if dataset is too large."""
@@ -74,7 +69,6 @@ def sample_if_large(X: pd.DataFrame, y: pd.Series, max_rows: int = MAX_SAMPLES):
     logger.info(f"Dataset has {len(X):,} rows — sampling down to {max_rows:,}")
     idx = np.random.RandomState(RANDOM_STATE).choice(len(X), max_rows, replace=False)
     return X.iloc[idx].reset_index(drop=True), y.iloc[idx].reset_index(drop=True)
-
 
 def save_model(model, name: str, metadata: dict = None):
     """Save model + metadata to disk AND MongoDB."""
@@ -112,7 +106,6 @@ def save_model(model, name: str, metadata: dict = None):
 
     return path
 
-
 def load_model(name: str):
     """Load model from disk, fallback to MongoDB."""
     path = os.path.join(MODEL_DIR, f"{name}.joblib")
@@ -133,11 +126,6 @@ def load_model(name: str):
         logger.warning(f"Could not load from MongoDB: {e}")
     return None
 
-
-# ─────────────────────────────────────────────────────────────────────────
-# MODEL 1: CLV PREDICTOR
-# ─────────────────────────────────────────────────────────────────────────
-
 def build_clv_dataset(db):
     logger.info("Building CLV dataset (30-day window)...")
     cutoff = cutoff_date()
@@ -148,7 +136,7 @@ def build_clv_dataset(db):
                      "first": {"$first": "$fetched_at"},
                      "last":  {"$last":  "$fetched_at"}}},
         {"$match":  {"count": {"$gte": 5}}},
-        {"$limit":  10_000},   # cap events queried per run
+        {"$limit":  10_000},   
     ]
     events = list(db[COL_ODDS_SNAPSHOTS].aggregate(pipeline, allowDiskUse=True))
     logger.info(f"CLV: {len(events)} events in window")
@@ -157,8 +145,20 @@ def build_clv_dataset(db):
 
     for ev in events:
         eid     = ev["_id"]
-        opening = db[COL_ODDS_SNAPSHOTS].find_one({"event_id": eid}, sort=[("fetched_at", 1)])
+        # Opening line must be a real snapshot with book_odds — exclude
+        # duplicate markers directly in the query.
+        opening = db[COL_ODDS_SNAPSHOTS].find_one(
+            {"event_id": eid, "is_duplicate": {"$ne": True}},
+            sort=[("fetched_at", 1)]
+        )
+        # Closing may legitimately be the latest document even if it's a
+        # marker (odds were stable right up to close) — resolve it back to
+        # the real snapshot it points to so book_odds is never missing.
         closing = db[COL_ODDS_SNAPSHOTS].find_one({"event_id": eid}, sort=[("fetched_at", -1)])
+        if closing and closing.get("is_duplicate"):
+            real_closing = db[COL_ODDS_SNAPSHOTS].find_one({"_id": closing.get("duplicate_of")})
+            if real_closing:
+                closing = real_closing
         if not opening or not closing:
             continue
 
@@ -194,7 +194,6 @@ def build_clv_dataset(db):
     logger.info(f"CLV dataset: {len(X):,} rows, {len(X.columns)} features")
     return X, y
 
-
 def train_clv_model(db) -> dict:
     result = build_clv_dataset(db)
     if not result:
@@ -224,11 +223,6 @@ def train_clv_model(db) -> dict:
     save_model(model, MODEL_CLV, metadata)
     logger.success(f"CLV trained — MAE: {mae:.6f}, samples: {len(X):,}")
     return {"success": True, "mae": mae, "samples": len(X)}
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# MODEL 2: SHARP MONEY DETECTOR
-# ─────────────────────────────────────────────────────────────────────────
 
 def build_sharp_money_dataset(db):
     logger.info("Building sharp money dataset (30-day window)...")
@@ -277,7 +271,6 @@ def build_sharp_money_dataset(db):
     logger.info(f"Sharp dataset: {len(X):,} rows")
     return X, y
 
-
 def train_sharp_money_model(db) -> dict:
     result = build_sharp_money_dataset(db)
     if not result:
@@ -286,7 +279,7 @@ def train_sharp_money_model(db) -> dict:
     X, y = result
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=RANDOM_STATE)
 
-    # HistGradientBoostingClassifier — 10-50x faster than GradientBoosting
+    
     model = HistGradientBoostingClassifier(
         max_iter=N_ESTIMATORS_LARGE,
         max_depth=4,
@@ -307,11 +300,6 @@ def train_sharp_money_model(db) -> dict:
     save_model(model, MODEL_SHARP, metadata)
     logger.success(f"Sharp money trained — acc: {acc:.4f}, AUC: {auc:.4f}, samples: {len(X):,}")
     return {"success": True, "accuracy": acc, "auc": auc}
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# MODEL 3: ARB WINDOW PREDICTOR
-# ─────────────────────────────────────────────────────────────────────────
 
 def build_arb_window_dataset(db):
     logger.info("Building arb window dataset (30-day window)...")
@@ -366,7 +354,6 @@ def build_arb_window_dataset(db):
     logger.info(f"Arb window dataset: {len(X):,} rows")
     return X, y
 
-
 def train_arb_window_model(db) -> dict:
     result = build_arb_window_dataset(db)
     if not result:
@@ -375,7 +362,7 @@ def train_arb_window_model(db) -> dict:
     X, y = result
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=RANDOM_STATE)
 
-    # HistGradientBoostingRegressor — dramatically faster than GradientBoosting
+    
     model = HistGradientBoostingRegressor(
         max_iter=N_ESTIMATORS_MEDIUM,
         max_depth=4,
@@ -390,11 +377,6 @@ def train_arb_window_model(db) -> dict:
     save_model(model, MODEL_ARB_WINDOW, metadata)
     logger.success(f"Arb window trained — MAE: {mae:.2f} min, samples: {len(X):,}")
     return {"success": True, "mae_minutes": mae}
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# MODEL 4: EV CONFIDENCE SCORE
-# ─────────────────────────────────────────────────────────────────────────
 
 def train_ev_confidence_model(db) -> dict:
     logger.info("Building EV confidence dataset (30-day window)...")
@@ -437,7 +419,7 @@ def train_ev_confidence_model(db) -> dict:
                                for b, o in books.items() if b != book and o]
                 avg_other   = np.mean(other_probs) if other_probs else pin_prob
 
-                # Use cached count to avoid per-row DB queries
+                
                 X_rows.append({
                     "ev_pct":          ev_pct,
                     "pin_prob":        pin_prob,
@@ -453,7 +435,7 @@ def train_ev_confidence_model(db) -> dict:
                 ))
 
         if len(X_rows) >= MAX_SAMPLES:
-            break  # stop early once we hit the cap
+            break  
 
     if len(X_rows) < MIN_TRAINING_ROWS:
         return {"success": False, "reason": "insufficient_data"}
@@ -478,11 +460,6 @@ def train_ev_confidence_model(db) -> dict:
     save_model(model, MODEL_EV_CONF, metadata)
     logger.success(f"EV confidence trained — acc: {acc:.4f}, samples: {len(X):,}")
     return {"success": True, "accuracy": acc}
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# TRAIN ALL
-# ─────────────────────────────────────────────────────────────────────────
 
 def train_all_models():
     db      = get_db()
@@ -512,7 +489,6 @@ def train_all_models():
     })
 
     return results
-
 
 if __name__ == "__main__":
     train_all_models()
