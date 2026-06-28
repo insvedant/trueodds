@@ -27,7 +27,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from ml.config import (
     MONGODB_URI, DB_NAME, COL_ML_PREDICTIONS, COL_ARB_HISTORY,
-    COL_ODDS_SNAPSHOTS, COL_LINE_MOVEMENTS,
+    COL_ODDS_SNAPSHOTS, COL_LINE_MOVEMENTS, COL_STATS,
 )
 from ml.features import build_features_for_event, american_to_decimal
 from ml.models.predict import (
@@ -69,13 +69,35 @@ def get_db():
 @app.get("/health")
 def health():
     db = get_db()
-    snapshot_count = db[COL_ODDS_SNAPSHOTS].count_documents({})
-    pred_count     = db[COL_ML_PREDICTIONS].count_documents({})
+    live_count = db[COL_ODDS_SNAPSHOTS].count_documents({})
+
+    # total_snapshots is the all-time write-time counter, incremented in
+    # collect_data.py / import_historical.py at the moment each document
+    # is inserted — not reconstructed by archive_snapshots.py, which only
+    # adjusts archived_snapshots/live_snapshots after each run. This is
+    # what keeps the number from dropping when old documents are deleted
+    # from Mongo after a successful archive. Falls back to the live count
+    # if no stats doc exists yet (fresh deploy, before any document has
+    # ever incremented this counter).
+    stats_doc = db[COL_STATS].find_one({"_id": "global"})
+    if stats_doc:
+        snapshot_count    = stats_doc.get("total_snapshots", live_count)
+        archived_count    = stats_doc.get("archived_snapshots", 0)
+        last_archive      = stats_doc.get("last_archive")
+    else:
+        snapshot_count = live_count
+        archived_count = 0
+        last_archive   = None
+
+    pred_count = db[COL_ML_PREDICTIONS].count_documents({})
     return {
-        "status":       "ok",
-        "snapshots":    snapshot_count,
-        "predictions":  pred_count,
-        "timestamp":    datetime.now(timezone.utc).isoformat(),
+        "status":             "ok",
+        "snapshots":          snapshot_count,
+        "live_snapshots":     live_count,
+        "archived_snapshots": archived_count,
+        "last_archive":       last_archive,
+        "predictions":        pred_count,
+        "timestamp":          datetime.now(timezone.utc).isoformat(),
     }
 
 @app.get("/predictions/{event_id}")
