@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from ml.config import (
     MONGODB_URI, DB_NAME, ODDS_API_KEY, ODDS_BASE_URL,
     TRACKED_SPORTS, TRACKED_BOOKS, SHARP_BOOKS,
-    COL_ODDS_SNAPSHOTS, COL_LINE_MOVEMENTS, COL_ARB_HISTORY,
+    COL_ODDS_SNAPSHOTS, COL_LINE_MOVEMENTS, COL_ARB_HISTORY, COL_STATS,
 )
 
 def get_db():
@@ -353,6 +353,22 @@ async def collect_snapshot():
                 total_games += 1
                 if unchanged:
                     total_duplicates += 1
+
+                # total_snapshots must increment exactly once per document
+                # ever written, at the moment it's written — this is the
+                # only correct source of truth for an all-time counter.
+                # archive_snapshots.py deliberately does NOT try to
+                # reconstruct this number after the fact; it only ever
+                # adjusts archived_snapshots/live_snapshots, since it has
+                # no visibility into how many documents were inserted
+                # between archive runs. upsert=True means the very first
+                # snapshot ever written creates this doc correctly with no
+                # special first-run handling needed anywhere else.
+                db[COL_STATS].update_one(
+                    {"_id": "global"},
+                    {"$inc": {"total_snapshots": 1}},
+                    upsert=True,
+                )
 
                 
                 movements = detect_line_movement(prev, event_id, sport, book_odds, now)
