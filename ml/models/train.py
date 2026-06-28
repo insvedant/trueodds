@@ -36,9 +36,65 @@ from ml.config import (
     MODEL_CLV, MODEL_SHARP, MODEL_ARB_WINDOW, MODEL_EV_CONF,
     COL_ODDS_SNAPSHOTS, COL_LINE_MOVEMENTS, COL_ARB_HISTORY,
 )
-from ml.features import build_features_for_event, american_to_decimal
+from ml.features import build_features_for_event, american_to_decimal, build_cross_book_features, minutes_to_game
+from ml.parquet_loader import load_historical_parquet
 
 os.makedirs(MODEL_DIR, exist_ok=True)
+
+# Zero-filled line-movement feature shape, copied verbatim from
+# features.build_line_movement_features()'s own no-movements-found return
+# value. Archived/Parquet-sourced events have no equivalent live
+# line_movements lookup available (that collection isn't archived), so we
+# fall back to this same "no movement data" shape rather than inventing a
+# different one that could silently mismatch columns at training time.
+_ZERO_MOVEMENT_FEATURES = {
+    "total_movements":      0,
+    "sharp_movements":      0,
+    "soft_movements":       0,
+    "avg_prob_change":      0.0,
+    "max_prob_change":      0.0,
+    "sharp_direction":      0,
+    "movement_velocity":    0.0,
+    "books_moving_same_dir": 0,
+    "steam_detected":       False,
+}
+
+
+def build_features_from_parquet_row(row: dict) -> dict | None:
+    """
+    Build the same feature shape as features.build_features_for_event(),
+    but from a single archived Parquet row instead of a live Mongo query.
+    Used so historical (archived) events can still contribute training
+    rows after their snapshots have been moved out of odds_snapshots.
+
+    book_odds on a duplicate-marker row can come back as either plain
+    None (pandas/pyarrow fallback path) or pandas' pd.NA sentinel
+    (DuckDB path) depending on which loader served the row — verified
+    empirically, not assumed. `not book_odds` would raise
+    "TypeError: boolean value of NA is ambiguous" on the DuckDB case.
+    pd.NA is caught below by the final `not isinstance(book_odds, dict)`
+    check (pd.NA is neither None nor a float, so it falls through to
+    there) rather than by the pd.isna() clause, which exists separately
+    to catch plain float NaN if that sentinel ever shows up instead.
+    """
+    book_odds = row.get("book_odds")
+    if book_odds is None or (isinstance(book_odds, float) and pd.isna(book_odds)) or not isinstance(book_odds, dict):
+        return None  # marker row with no real odds — nothing to build features from
+    if not book_odds:
+        return None  # empty dict — no markets present
+
+    commence = row.get("commence_time", "")
+    features = {
+        "event_id":        row.get("event_id", ""),
+        "sport":           row.get("sport", ""),
+        "home":            row.get("home", ""),
+        "away":            row.get("away", ""),
+        "minutes_to_game": minutes_to_game(commence),
+    }
+    features.update(build_cross_book_features(book_odds))
+    features.update(_ZERO_MOVEMENT_FEATURES)
+    return features
+
 
 ROLLING_DAYS    = 30       
 MAX_SAMPLES     = 50_000   
@@ -127,9 +183,11 @@ def load_model(name: str):
     return None
 
 def build_clv_dataset(db):
-    logger.info("Building CLV dataset (30-day window)...")
+    logger.info("Building CLV dataset (30-day window, Mongo + Parquet merged)...")
     cutoff = cutoff_date()
 
+    # ── Live (Mongo) qualifying events — unchanged from before ───────────
+    # Events with >=5 snapshots still sitting in Mongo's rolling window.
     pipeline = [
         {"$match":  {"fetched_at": {"$gte": cutoff}}},
         {"$group":  {"_id": "$event_id", "count": {"$sum": 1},
@@ -138,12 +196,12 @@ def build_clv_dataset(db):
         {"$match":  {"count": {"$gte": 5}}},
         {"$limit":  10_000},   
     ]
-    events = list(db[COL_ODDS_SNAPSHOTS].aggregate(pipeline, allowDiskUse=True))
-    logger.info(f"CLV: {len(events)} events in window")
+    mongo_events = list(db[COL_ODDS_SNAPSHOTS].aggregate(pipeline, allowDiskUse=True))
+    logger.info(f"CLV: {len(mongo_events)} live events in Mongo window")
 
     X_rows, y_vals = [], []
 
-    for ev in events:
+    for ev in mongo_events:
         eid     = ev["_id"]
         # Opening line must be a real snapshot with book_odds — exclude
         # duplicate markers directly in the query.
@@ -186,12 +244,69 @@ def build_clv_dataset(db):
         X_rows.append(row)
         y_vals.append(np.mean(shifts))
 
+    # ── Archived (Parquet) qualifying events ──────────────────────────────
+    # Anything older than LIVE_RETENTION_DAYS has already been moved out of
+    # Mongo by archive_snapshots.py. We still want it in the 30-day CLV
+    # training window, so load it from Parquet and group/process it the
+    # same way, entirely in pandas this time since there's no Mongo
+    # collection left to query for these events.
+    archived = load_historical_parquet(cutoff_after=pd.Timestamp(cutoff))
+    if not archived.empty and "event_id" in archived.columns:
+        archived_real = archived[archived.get("is_duplicate") != True] if "is_duplicate" in archived.columns else archived
+        archived_real = archived_real[archived_real["book_odds"].notna()] if "book_odds" in archived_real.columns else archived_real
+
+        if not archived_real.empty:
+            archived_real = archived_real.sort_values("fetched_at")
+            grouped = archived_real.groupby("event_id")
+            parquet_events_used = 0
+
+            for eid, group in grouped:
+                if len(group) < 5:
+                    continue
+                opening_row = group.iloc[0].to_dict()
+                closing_row = group.iloc[-1].to_dict()
+
+                features = build_features_from_parquet_row(closing_row)
+                if not features:
+                    continue
+
+                shifts = []
+                # Defensive: archived_real was already filtered to non-null
+                # book_odds above, so these should always be real dicts —
+                # but pd.NA's truthiness raises TypeError rather than being
+                # falsy (`pd.NA or {}` crashes, unlike `None or {}`), so we
+                # guard explicitly rather than rely on the upstream filter
+                # never changing.
+                opening_bo = opening_row.get("book_odds")
+                closing_bo = closing_row.get("book_odds")
+                open_h2h  = opening_bo.get("h2h", {}) if isinstance(opening_bo, dict) else {}
+                close_h2h = closing_bo.get("h2h", {}) if isinstance(closing_bo, dict) else {}
+
+                for sel in open_h2h:
+                    if sel in close_h2h:
+                        common = set(open_h2h[sel]) & set(close_h2h[sel])
+                        if common:
+                            open_avg  = np.mean([american_to_decimal(open_h2h[sel][b])  for b in common])
+                            close_avg = np.mean([american_to_decimal(close_h2h[sel][b]) for b in common])
+                            shifts.append(close_avg - open_avg)
+
+                if not shifts:
+                    continue
+
+                row = {k: v for k, v in features.items()
+                       if isinstance(v, (int, float, bool)) and k != "event_id"}
+                X_rows.append(row)
+                y_vals.append(np.mean(shifts))
+                parquet_events_used += 1
+
+            logger.info(f"CLV: {parquet_events_used} archived (Parquet) events added to training pool")
+
     if len(X_rows) < MIN_TRAINING_ROWS:
-        logger.warning(f"CLV: only {len(X_rows)} samples (need {MIN_TRAINING_ROWS})")
+        logger.warning(f"CLV: only {len(X_rows)} samples total (need {MIN_TRAINING_ROWS})")
         return None
 
     X, y = sample_if_large(pd.DataFrame(X_rows).fillna(0), pd.Series(y_vals))
-    logger.info(f"CLV dataset: {len(X):,} rows, {len(X.columns)} features")
+    logger.info(f"CLV dataset: {len(X):,} rows, {len(X.columns)} features (Mongo + Parquet merged)")
     return X, y
 
 def train_clv_model(db) -> dict:
@@ -379,13 +494,31 @@ def train_arb_window_model(db) -> dict:
     return {"success": True, "mae_minutes": mae}
 
 def train_ev_confidence_model(db) -> dict:
-    logger.info("Building EV confidence dataset (30-day window)...")
+    logger.info("Building EV confidence dataset (30-day window, Mongo + Parquet merged)...")
     cutoff = cutoff_date()
 
     snapshots = list(db[COL_ODDS_SNAPSHOTS].find(
         {"book_odds.h2h": {"$exists": True}, "fetched_at": {"$gte": cutoff}},
         sort=[("fetched_at", -1)],
     ).limit(MAX_SAMPLES))
+
+    # Append archived (Parquet) rows from the same 30-day window so this
+    # model trains on the full rolling window even for events whose
+    # snapshots have already aged out of Mongo via archive_snapshots.py.
+    # Only rows with a real book_odds.h2h are usable — duplicate markers
+    # (book_odds is None after the parquet round-trip) are filtered out
+    # here rather than assumed absent.
+    remaining_budget = MAX_SAMPLES - len(snapshots)
+    if remaining_budget > 0:
+        archived_df = load_historical_parquet(cutoff_after=pd.Timestamp(cutoff))
+        if not archived_df.empty and "book_odds" in archived_df.columns:
+            archived_records = archived_df.to_dict("records")
+            archived_usable = [
+                r for r in archived_records
+                if isinstance(r.get("book_odds"), dict) and r["book_odds"].get("h2h")
+            ][:remaining_budget]
+            logger.info(f"EV confidence: +{len(archived_usable)} archived (Parquet) rows added")
+            snapshots.extend(archived_usable)
 
     if len(snapshots) < MIN_TRAINING_ROWS:
         return {"success": False, "reason": "insufficient_data"}
