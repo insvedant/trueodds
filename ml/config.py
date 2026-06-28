@@ -45,6 +45,42 @@ MODEL_DIR          = os.path.join(os.path.dirname(__file__), "saved_models")
 MIN_TRAINING_ROWS  = 500              
 RETRAIN_INTERVAL_H = 24              
 
+# ── Mongo → Parquet archival architecture ────────────────────────────────
+# Mongo keeps only the rolling live window; anything older than this is
+# archived to Parquet on local SSD and removed from Mongo to keep the
+# Atlas free tier (512MB) from filling up. Training reads BOTH sources
+# and merges them, so model quality is unaffected by where a row lives.
+COL_STATS          = "stats"
+ARCHIVE_DIR         = os.getenv("ARCHIVE_DIR", "/home/ubuntu/data_archive")
+LIVE_RETENTION_DAYS = int(os.getenv("LIVE_RETENTION_DAYS", "7"))
+
+# Archive files live under a per-collection subfolder, e.g.
+#   {ARCHIVE_DIR}/odds_snapshots/year=2026/month=06/day=26.parquet
+# Currently only odds_snapshots is archived (see ml/models/train.py
+# comments on why line_movements/arb_history are out of scope for now),
+# but the subfolder exists from day one so adding a second archived
+# collection later never collides with this one's files.
+ARCHIVE_SUBDIR_ODDS_SNAPSHOTS = COL_ODDS_SNAPSHOTS
+
+# Daily archive writes favor snappy (faster write, slightly larger file) —
+# this runs once a day per partition and write latency matters more than
+# squeezing out the last bit of disk space on a file that's about to be
+# superseded by the monthly compaction anyway.
+DAILY_ARCHIVE_COMPRESSION = os.getenv("DAILY_ARCHIVE_COMPRESSION", "snappy")
+
+# Monthly compacted files favor zstd — written once per month, read
+# repeatedly by every training run thereafter, so a better compression
+# ratio (smaller file, less disk I/O on every load) is worth the slightly
+# slower one-time write. Verified pyarrow on this system supports zstd.
+MONTHLY_COMPACT_COMPRESSION = os.getenv("MONTHLY_COMPACT_COMPRESSION", "zstd")
+
+# Pre-existing historical backup directory from before this archival
+# system existed. Schema/partitioning of these files is not guaranteed to
+# match ARCHIVE_DIR's — parquet_loader.py merges both via union_by_name
+# and handles missing/mismatched columns defensively rather than assuming
+# the old backup has the same shape as new archive output.
+LEGACY_ARCHIVE_DIR = os.getenv("LEGACY_ARCHIVE_DIR", "/home/ubuntu/parquet_backup")
+
 MODEL_CLV        = "clv_predictor"
 MODEL_SHARP      = "sharp_money_detector"
 MODEL_ARB_WINDOW = "arb_window_predictor"
