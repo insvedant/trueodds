@@ -117,7 +117,7 @@ function formatArbTweet(arb, region) {
     `💰 +${profit}% guaranteed profit`,
     `📚 ${b1} vs ${b2}`,
     ``,
-    `Full details + calculator on TrueOdds.`,
+    `Full details + calculator on TrueOdds`,
     ``,
     `#SportsBetting #Arbitrage #BettingTips #FreePick`,
   ].join('\n').slice(0, 280)
