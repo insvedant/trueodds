@@ -47,18 +47,30 @@ except ImportError:
 
 def _glob_patterns() -> list[str]:
     """
-    Patterns for both source directories. Matches daily partitions
-    (year=*/month=*/day=*.parquet), monthly-compacted files
-    (monthly_YYYY_MM.parquet), and anything else under the legacy
-    directory regardless of its internal layout, since we don't know its
-    exact structure — a flat glob for *.parquet anywhere under it is the
-    safest assumption.
+    Return glob patterns for directories that actually contain parquet files.
+    A directory that merely EXISTS but is empty (e.g. data_archive/ on day 1
+    of a fresh deploy, before the 7-day retention window elapses) must NOT
+    produce a pattern — DuckDB raises IOException: No files found if given
+    a glob that matches zero files, confirmed empirically against the actual
+    installed DuckDB version.
     """
     patterns = []
+
+    archive_pattern = os.path.join(ARCHIVE_DIR, "**", "*.parquet")
+    legacy_pattern  = os.path.join(LEGACY_ARCHIVE_DIR, "**", "*.parquet")
+
     if os.path.isdir(ARCHIVE_DIR):
-        patterns.append(os.path.join(ARCHIVE_DIR, "**", "*.parquet"))
+        if glob.glob(archive_pattern, recursive=True):
+            patterns.append(archive_pattern)
+        else:
+            logger.info(f"No parquet files yet in {ARCHIVE_DIR}, skipping")
+
     if os.path.isdir(LEGACY_ARCHIVE_DIR):
-        patterns.append(os.path.join(LEGACY_ARCHIVE_DIR, "**", "*.parquet"))
+        if glob.glob(legacy_pattern, recursive=True):
+            patterns.append(legacy_pattern)
+        else:
+            logger.warning(f"No parquet files found in {LEGACY_ARCHIVE_DIR}")
+
     return patterns
 
 
