@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from ml.config import (
     MONGODB_URI, DB_NAME, ODDS_API_KEY, ODDS_BASE_URL,
     TRACKED_SPORTS, TRACKED_BOOKS, COL_ODDS_SNAPSHOTS,
-    COL_LINE_MOVEMENTS, HISTORICAL_LOOKBACK_DAYS,
+    COL_LINE_MOVEMENTS, HISTORICAL_LOOKBACK_DAYS, COL_STATS,
 )
 from ml.collect_data import extract_book_odds, detect_arbitrage, american_to_decimal, implied_prob
 
@@ -103,7 +103,6 @@ async def import_sport_history(sport: str, days_back: int, db):
                     "away":           away,
                     "commence_time":  commence,
                     "book_odds":      book_odds,
-                    "raw_bookmakers": game.get("bookmakers", []),
                     "fetched_at":     target_date,
                     "is_historical":  True,
                     "is_duplicate":   False,
@@ -111,6 +110,15 @@ async def import_sport_history(sport: str, days_back: int, db):
 
                 db[COL_ODDS_SNAPSHOTS].insert_one(snapshot)
                 total_stored += 1
+
+                # Same all-time counter as collect_data.py's live path —
+                # see that file's comment for why this lives at the
+                # insertion point rather than being reconstructed later.
+                db[COL_STATS].update_one(
+                    {"_id": "global"},
+                    {"$inc": {"total_snapshots": 1}},
+                    upsert=True,
+                )
 
                 
                 arbs = detect_arbitrage(book_odds, event_id, sport, home, away, target_date)
