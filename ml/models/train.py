@@ -250,7 +250,18 @@ def build_clv_dataset(db):
     # training window, so load it from Parquet and group/process it the
     # same way, entirely in pandas this time since there's no Mongo
     # collection left to query for these events.
-    archived = load_historical_parquet(cutoff_after=pd.Timestamp(cutoff))
+    # Column pruning is CRITICAL here — the legacy parquet backup contains
+    # raw_bookmakers (several KB per row). Loading only the 4 fields we
+    # actually use avoids materializing that column into RAM and freezing
+    # the VM. DuckDB pushes this projection down before reading; the
+    # pandas fallback path passes it to read_parquet(columns=...) which
+    # pyarrow honours at the row-group level, so neither path loads
+    # raw_bookmakers regardless of which loader actually runs.
+    CLV_PARQUET_COLS = ["event_id", "book_odds", "fetched_at", "is_duplicate"]
+    archived = load_historical_parquet(
+        cutoff_after=pd.Timestamp(cutoff),
+        columns=CLV_PARQUET_COLS,
+    )
     if not archived.empty and "event_id" in archived.columns:
         archived_real = archived[archived.get("is_duplicate") != True] if "is_duplicate" in archived.columns else archived
         archived_real = archived_real[archived_real["book_odds"].notna()] if "book_odds" in archived_real.columns else archived_real
@@ -510,7 +521,13 @@ def train_ev_confidence_model(db) -> dict:
     # here rather than assumed absent.
     remaining_budget = MAX_SAMPLES - len(snapshots)
     if remaining_budget > 0:
-        archived_df = load_historical_parquet(cutoff_after=pd.Timestamp(cutoff))
+        # Same column pruning rationale as build_clv_dataset — only load
+        # the two fields actually consumed below. raw_bookmakers in the
+        # legacy backup must NOT be loaded into RAM.
+        archived_df = load_historical_parquet(
+            cutoff_after=pd.Timestamp(cutoff),
+            columns=["event_id", "book_odds"],
+        )
         if not archived_df.empty and "book_odds" in archived_df.columns:
             archived_records = archived_df.to_dict("records")
             archived_usable = [
