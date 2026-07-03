@@ -31,25 +31,42 @@ router.get('/health', async (req, res) => {
     const withTimeout = (p, ms = 4000) =>
       Promise.race([p, new Promise(r => setTimeout(() => r(0), ms))])
 
-    const [snapshots, predictions, lineMovs, arbHistory] = await Promise.all([
+    const [liveSnapshots, predictions, lineMovs, arbHistory, statsDoc] = await Promise.all([
       withTimeout(db.collection('odds_snapshots').countDocuments()),
       withTimeout(db.collection('ml_predictions').countDocuments()),
       withTimeout(db.collection('line_movements').countDocuments()),
       withTimeout(db.collection('arb_history').countDocuments()),
+      withTimeout(db.collection('stats').findOne({ _id: 'global' })),
     ])
+
+    // total_snapshots is an all-time counter incremented at write time by
+    // ml/collect_data.py and ml/import_historical.py every time a
+    // document is inserted into odds_snapshots — NOT something this
+    // route or archive_snapshots.py computes. This is what the
+    // dashboard's "X snapshots collected" counter should show — it must
+    // NOT drop the moment old documents get deleted from Mongo after a
+    // successful archive run. Falls back to the live count if no stats
+    // doc exists yet (fresh deploy, before this counter was ever written).
+    const snapshots = (statsDoc && typeof statsDoc.total_snapshots === 'number')
+      ? statsDoc.total_snapshots
+      : liveSnapshots
+    const archivedSnapshots = statsDoc?.archived_snapshots || 0
 
     res.json({
       success: true,
       ml_service: health.offline ? 'offline' : 'online',
       data_pipeline: {
-        odds_snapshots:  snapshots,
-        predictions:     predictions,
-        line_movements:  lineMovs,
-        arb_history:     arbHistory,
-        ready_for_ml:    snapshots >= 500,
-        status:          snapshots < 100  ? 'collecting'
-                       : snapshots < 500  ? 'building'
-                       : 'ready',
+        odds_snapshots:      snapshots,
+        live_snapshots:      liveSnapshots,
+        archived_snapshots:  archivedSnapshots,
+        last_archive:        statsDoc?.last_archive || null,
+        predictions:         predictions,
+        line_movements:      lineMovs,
+        arb_history:         arbHistory,
+        ready_for_ml:        snapshots >= 500,
+        status:              snapshots < 100  ? 'collecting'
+                           : snapshots < 500  ? 'building'
+                           : 'ready',
       },
       ml_health: health,
     })
@@ -286,22 +303,39 @@ router.get('/dashboard', protect, async (req, res) => {
   const now = new Date()
   const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000)
 
-  const [snapshots, predictions, movements, arbs, trainingLog] = await Promise.all([
+  const [liveSnapshots, predictions, movements, arbs, trainingLog, statsDoc] = await Promise.all([
     db.collection('odds_snapshots').countDocuments(),
     db.collection('ml_predictions').countDocuments(),
     db.collection('line_movements').countDocuments(),
     db.collection('arb_history').countDocuments(),
     db.collection('ml_training_log').find({}, { sort: { trained_at: -1 }, limit: 5 }).toArray(),
+    db.collection('stats').findOne({ _id: 'global' }),
   ])
 
   const snapshotsToday = await db.collection('odds_snapshots').countDocuments({
     fetched_at: { $gte: oneDayAgo },
   })
 
+  // total_snapshots is the all-time write-time counter (incremented in
+  // ml/collect_data.py / ml/import_historical.py at insertion time), so
+  // it includes everything ever collected, archived or not. It is NOT
+  // reconstructed by archive_snapshots.py — that script only adjusts
+  // archived_snapshots/live_snapshots after each run. snapshots_today
+  // intentionally stays as a pure live-Mongo count: it's measuring
+  // recent collection velocity, not an all-time total, and the 7-day
+  // retention window means nothing from the last 24h would ever have
+  // been archived anyway.
+  const snapshots = (statsDoc && typeof statsDoc.total_snapshots === 'number')
+    ? statsDoc.total_snapshots
+    : liveSnapshots
+
   res.json({
     success: true,
     pipeline: {
       total_snapshots:    snapshots,
+      live_snapshots:     liveSnapshots,
+      archived_snapshots: statsDoc?.archived_snapshots || 0,
+      last_archive:       statsDoc?.last_archive || null,
       snapshots_today:    snapshotsToday,
       total_predictions:  predictions,
       line_movements:     movements,
