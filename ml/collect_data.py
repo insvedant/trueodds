@@ -118,17 +118,61 @@ async def fetch_odds_for_sport(sport: str, client: httpx.AsyncClient) -> list:
         logger.error(f"Failed to fetch odds for {sport}: {e}")
         return []
 
-def extract_book_odds(game: dict) -> dict:
+def extract_compact_line_data(game: dict) -> dict:
     """
-    Extract all book odds from a game into a flat structure:
+    Extract compact per-market odds from a game's bookmakers array,
+    WITHOUT the full raw_bookmakers payload (titles, last_update strings,
+    nested market/outcome arrays kept verbatim) that was the actual
+    storage problem — confirmed by exhaustive search to have zero readers
+    anywhere in this codebase.
+
+    Replaces the old extract_book_odds(). Same name used at every call
+    site is still `book_odds` (not renamed to a separate `line_data`
+    field) — h2h/spreads/totals are kept in ONE structure, market-keyed
+    first, because every existing training/feature function
+    (build_cross_book_features, build_clv_dataset, train_ev_confidence_model)
+    already depends on that exact shape for h2h. Introducing a second,
+    differently-shaped field alongside it would duplicate the same price
+    data and force every future feature to reshape one structure into the
+    other — confirmed by inspection that nothing in the codebase reads
+    "spreads"/"totals" today, so there is no existing shape to preserve
+    there; extending book_odds in place is the minimal correct change.
+
+    Shape:
     {
       "h2h": {
-        "home": {"draftkings": -110, "fanduel": -115, ...},
-        "away": {"draftkings": +100, ...},
+        "Team A": {"draftkings": -110, "fanduel": -115, ...},
+        "Team B": {"draftkings": +100, ...},
       },
-      "spreads": {...},
-      "totals": {...},
+      "spreads": {
+        "Team A": {"draftkings": {"price": -115, "point": -3.5}, ...},
+        "Team B": {"draftkings": {"price": -105, "point":  3.5}, ...},
+      },
+      "totals": {
+        "Over":  {"draftkings": {"price": -110, "point": 44.5}, ...},
+        "Under": {"draftkings": {"price": -110, "point": 44.5}, ...},
+      },
     }
+
+    h2h entries stay a bare price (no point value exists for a
+    moneyline), unchanged from before — this is the shape every existing
+    model already reads, so nothing downstream breaks. spreads/totals
+    entries now carry {price, point} instead of a bare price — confirmed
+    by exhaustive search that nothing currently reads "spreads" or
+    "totals" anywhere, so this shape change cannot break any existing
+    consumer; it only enables the future spread-CLV / reverse-line-
+    movement features this was requested for.
+
+    Deliberately NOT capturing a per-book last_update timestamp here,
+    even though the original raw_bookmakers had one and a future steam-
+    detection feature could theoretically use it: every snapshot document
+    already has its own top-level fetched_at, and detect_line_movement()
+    already derives "did this change since last snapshot" by diffing
+    consecutive snapshots' book_odds — adding a redundant per-book
+    timestamp string to every market/selection/book combination would
+    partially undo the storage reduction this change exists to achieve,
+    for a capability nothing currently needs. Flagging this explicitly
+    rather than silently omitting it.
     """
     result = {}
 
@@ -145,13 +189,46 @@ def extract_book_odds(game: dict) -> dict:
             for outcome in market.get("outcomes", []):
                 name  = outcome["name"]
                 price = outcome["price"]
+                point = outcome.get("point")  # only present for spreads/totals
 
                 if name not in result[mkt_key]:
                     result[mkt_key][name] = {}
 
-                result[mkt_key][name][book_key] = price
+                if point is not None:
+                    result[mkt_key][name][book_key] = {"price": price, "point": point}
+                else:
+                    result[mkt_key][name][book_key] = price
 
     return result
+
+# Backward-compatible alias — extract_book_odds is the name imported by
+# import_historical.py and used historically. Kept as a plain alias
+# (not a duplicated implementation) so there is exactly one place this
+# logic lives, per the "minimal but correct" instruction.
+extract_book_odds = extract_compact_line_data
+
+def _extract_price_and_point(odds_value):
+    """
+    Normalize an odds value from either schema format into (price, point).
+
+    New schema (spreads/totals after the raw_bookmakers removal):
+        {"price": -115, "point": -3.5}  →  (-115, -3.5)
+
+    Old schema (all markets in legacy Mongo/Parquet, h2h always):
+        -115                             →  (-115, None)
+
+    Returns (price: int|float, point: int|float|None).
+    Never raises — if the value is a dict but missing expected keys,
+    falls back gracefully to (None, None) so callers can skip the record.
+    """
+    if isinstance(odds_value, dict):
+        price = odds_value.get("price")
+        point = odds_value.get("point")
+        return price, point
+    elif odds_value is not None:
+        return odds_value, None
+    return None, None
+
 
 def detect_line_movement(prev: dict | None, event_id: str, sport: str, book_odds: dict, now: datetime) -> list:
     """
@@ -159,11 +236,17 @@ def detect_line_movement(prev: dict | None, event_id: str, sport: str, book_odds
     `prev` is passed in by the caller (already fetched once in
     collect_snapshot) so we don't hit Mongo twice per game per cycle.
     Returns list of line movement events for storage.
+
+    Supports both schema formats in the same run:
+    - h2h values are always bare integers (no point value exists for a moneyline)
+    - spreads/totals values are {price, point} dicts in new snapshots, but may
+      still be bare integers in old Mongo docs or old parquet backup files —
+      both are handled via _extract_price_and_point() above.
     """
     movements = []
 
     if not prev:
-        return movements  
+        return movements
 
     prev_book_odds = prev.get("book_odds", {})
 
@@ -173,31 +256,68 @@ def detect_line_movement(prev: dict | None, event_id: str, sport: str, book_odds
         for selection, books in selections.items():
             prev_selection = prev_market.get(selection, {})
 
-            for book, current_odds in books.items():
-                prev_odds = prev_selection.get(book)
-                if prev_odds is None or prev_odds == current_odds:
+            for book, current_value in books.items():
+                prev_value = prev_selection.get(book)
+                if prev_value is None:
                     continue
 
-                
+                curr_price, curr_point = _extract_price_and_point(current_value)
+                prev_price, prev_point = _extract_price_and_point(prev_value)
+
+                if curr_price is None or prev_price is None:
+                    continue
+
+                price_changed = curr_price != prev_price
+                # point_changed only meaningful when the schema carries a point
+                # (spreads/totals). When both are None (h2h or old-schema bare
+                # price), we treat point as unchanged to avoid false positives.
+                point_changed = (
+                    curr_point is not None
+                    and prev_point is not None
+                    and curr_point != prev_point
+                )
+
+                if not price_changed and not point_changed:
+                    continue
+
                 is_sharp = book in SHARP_BOOKS
+
                 movement = {
-                    "event_id":    event_id,
-                    "sport":       sport,
-                    "market":      market,
-                    "selection":   selection,
-                    "book":        book,
-                    "prev_odds":   prev_odds,
-                    "curr_odds":   current_odds,
-                    "prev_dec":    american_to_decimal(prev_odds),
-                    "curr_dec":    american_to_decimal(current_odds),
-                    "prev_prob":   implied_prob(prev_odds),
-                    "curr_prob":   implied_prob(current_odds),
-                    "prob_change": implied_prob(current_odds) - implied_prob(prev_odds),
-                    "moved_up":    current_odds > prev_odds,   
-                    "is_sharp_book": is_sharp,
-                    "minutes_to_game": None,  
-                    "timestamp":   now,
-                    "seconds_since_prev": (now - prev["fetched_at"]).total_seconds(),
+                    "event_id":      event_id,
+                    "sport":         sport,
+                    "market":        market,
+                    "selection":     selection,
+                    "book":          book,
+                    # Price fields — always present
+                    "prev_price":    prev_price,
+                    "curr_price":    curr_price,
+                    "prev_dec":      american_to_decimal(prev_price),
+                    "curr_dec":      american_to_decimal(curr_price),
+                    "prev_prob":     implied_prob(prev_price),
+                    "curr_prob":     implied_prob(curr_price),
+                    "prob_change":   implied_prob(curr_price) - implied_prob(prev_price),
+                    "moved_up":      curr_price > prev_price,
+                    "price_changed": price_changed,
+                    # Point fields — None for h2h and old-schema data
+                    "prev_point":    prev_point,
+                    "curr_point":    curr_point,
+                    "point_delta":   (
+                        round(curr_point - prev_point, 4)
+                        if curr_point is not None and prev_point is not None
+                        else None
+                    ),
+                    "point_changed": point_changed,
+                    # Legacy aliases — kept so build_sharp_money_dataset's
+                    # existing query {is_sharp_book: True} still matches
+                    # without a schema migration on the line_movements collection
+                    "prev_odds":       prev_price,
+                    "curr_odds":       curr_price,
+                    "is_sharp_book":   is_sharp,
+                    "minutes_to_game": None,
+                    "timestamp":       now,
+                    "seconds_since_prev": (
+                        now - prev["fetched_at"]
+                    ).total_seconds() if "fetched_at" in prev else None,
                 }
                 movements.append(movement)
 
@@ -344,7 +464,6 @@ async def collect_snapshot():
                         "away":          away,
                         "commence_time": commence,
                         "book_odds":     book_odds,
-                        "raw_bookmakers": game.get("bookmakers", []),
                         "fetched_at":    now,
                         "is_duplicate":  False,
                     }
