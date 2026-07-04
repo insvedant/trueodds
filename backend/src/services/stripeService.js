@@ -49,12 +49,16 @@ async function createSubscriptionWithTrial({ name, email, planId, paymentMethodI
     const saleLive = promo.active && !expired
 
     if (saleLive) {
-      const basePlan = planId.replace('_yearly', '') // basic_yearly -> basic
-      const couponId = promo.coupons?.[basePlan]
+      // Build the exact key matching the 6-coupon schema:
+      //   basic         → basic_monthly
+      //   basic_yearly  → basic_yearly
+      //   gold          → gold_monthly
+      //   gold_yearly   → gold_yearly  ... etc.
+      const isYearly = planId.endsWith('_yearly')
+      const basePlan = planId.replace('_yearly', '')
+      const couponKey = `${basePlan}_${isYearly ? 'yearly' : 'monthly'}`
+      const couponId = promo.coupons?.[couponKey]
       if (couponId) {
-        // Confirm the coupon is still valid on Stripe's side too — handles
-        // the case where it expired or hit max redemptions even if our own
-        // `active` flag is stale.
         const stripeCoupon = await stripe.coupons.retrieve(couponId)
         if (stripeCoupon.valid) coupon = couponId
       }
