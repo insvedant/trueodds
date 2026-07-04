@@ -61,9 +61,12 @@ router.put('/', protect, adminOnly, async (req, res) => {
 
     if (coupons && typeof coupons === 'object') {
       promo.coupons = {
-        basic:    coupons.basic    ?? promo.coupons.basic,
-        gold:     coupons.gold     ?? promo.coupons.gold,
-        platinum: coupons.platinum ?? promo.coupons.platinum,
+        basic_monthly:    coupons.basic_monthly    ?? promo.coupons.basic_monthly,
+        basic_yearly:     coupons.basic_yearly     ?? promo.coupons.basic_yearly,
+        gold_monthly:     coupons.gold_monthly     ?? promo.coupons.gold_monthly,
+        gold_yearly:      coupons.gold_yearly      ?? promo.coupons.gold_yearly,
+        platinum_monthly: coupons.platinum_monthly ?? promo.coupons.platinum_monthly,
+        platinum_yearly:  coupons.platinum_yearly  ?? promo.coupons.platinum_yearly,
       }
     }
     if (displayPrices && typeof displayPrices === 'object') {
