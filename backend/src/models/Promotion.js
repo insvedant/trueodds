@@ -19,13 +19,17 @@ const promotionSchema = new mongoose.Schema({
   // this passes, even if `active` is still true (in case you forget to flip it).
   endsAt: { type: Date, default: null },
 
-  // Stripe Coupon IDs (NOT promotion codes — these are applied directly
-  // server-side via `coupon:` on subscription create, no customer-facing
-  // code needed). One per plan, since each plan has a different base price.
+  // Stripe Coupon IDs — one per plan per billing cycle, since you created
+  // 6 separate coupons in Stripe (basic/gold/platinum × monthly/yearly).
+  // Applied server-side at subscription creation time; customers never
+  // see or type these codes.
   coupons: {
-    basic:    { type: String, default: '' },
-    gold:     { type: String, default: '' },
-    platinum: { type: String, default: '' },
+    basic_monthly:    { type: String, default: '' },
+    basic_yearly:     { type: String, default: '' },
+    gold_monthly:     { type: String, default: '' },
+    gold_yearly:      { type: String, default: '' },
+    platinum_monthly: { type: String, default: '' },
+    platinum_yearly:  { type: String, default: '' },
   },
 
   // Display-only sale prices — what the frontend shows crossed-out vs sale
