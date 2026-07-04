@@ -42,11 +42,15 @@ def previous_month_ym() -> tuple[int, int]:
 
 
 def daily_files_for(year: int, month: int) -> list[str]:
-    pattern = os.path.join(
+    month_dir = os.path.join(
         ARCHIVE_DIR, ARCHIVE_SUBDIR_ODDS_SNAPSHOTS,
-        f"year={year:04d}", f"month={month:02d}", "day=*.parquet",
+        f"year={year:04d}", f"month={month:02d}",
     )
-    return sorted(glob.glob(pattern))
+    # New format: day=DD/batch_NNNN.parquet (batched, memory-bounded archival)
+    new_pattern = os.path.join(month_dir, "day=*", "batch_*.parquet")
+    # Legacy format: day=DD.parquet (old single-file-per-day archival)
+    old_pattern = os.path.join(month_dir, "day=*.parquet")
+    return sorted(glob.glob(new_pattern) + glob.glob(old_pattern))
 
 
 def verify_monthly_write(monthly_path: str, expected_rows: int) -> bool:
@@ -116,11 +120,20 @@ def compact_month(year: int, month: int, delete_dailies: bool = True) -> dict:
     if delete_dailies:
         for f in daily_files:
             os.remove(f)
-        # Clean up now-empty day directories under this month, if any.
+        # Clean up now-empty day=DD/ subdirs and the month dir itself.
         month_dir = os.path.join(
             ARCHIVE_DIR, ARCHIVE_SUBDIR_ODDS_SNAPSHOTS, f"year={year:04d}", f"month={month:02d}",
         )
         try:
+            # Remove any empty day=DD/ subdirectories (new batched format)
+            for entry in os.scandir(month_dir):
+                if entry.is_dir() and entry.name.startswith("day="):
+                    try:
+                        if not os.listdir(entry.path):
+                            os.rmdir(entry.path)
+                    except OSError:
+                        pass
+            # Remove the month dir itself if now empty
             if not os.listdir(month_dir):
                 os.rmdir(month_dir)
         except OSError:
