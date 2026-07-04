@@ -5,24 +5,23 @@ Run daily (see cron setup). Moves any odds_snapshots document older than
 LIVE_RETENTION_DAYS out of MongoDB and into a local Parquet file on the
 Oracle VM's SSD, partitioned by date:
 
-    {ARCHIVE_DIR}/year=YYYY/month=MM/day=DD.parquet
+    {ARCHIVE_DIR}/odds_snapshots/year=YYYY/month=MM/day=DD/batch_NNNN.parquet
 
-A document is only deleted from Mongo after the Parquet write for its
-date partition has been read back and row-count-verified — a write that
-throws, or that silently truncates, will NOT trigger deletion. This is
-deliberately strict: losing historical training data is treated as worse
-than Mongo staying a bit fuller for one more day.
+Each batch of BATCH_SIZE documents writes its own file within the day
+directory — this avoids loading existing Parquet files into RAM to append
+to them. parquet_loader.py's recursive glob ('**/*.parquet') and DuckDB's
+union_by_name already treat all files under a directory as one logical
+partition, so training compatibility is unaffected.
 
-Maintains a `stats` collection so the frontend's "X snapshots collected"
-counter survives archival deletion (see ml/api/server.py /health and
-backend/src/routes/ml.js /health + /dashboard, both patched to read this).
+A document is only deleted from Mongo after its batch Parquet file has
+been read back and row-count-verified using PyArrow metadata (not a full
+pandas read) — a write that throws, or that silently truncates, will NOT
+trigger deletion.
 
 total_snapshots is an all-time counter owned by write-time $inc calls in
-collect_data.py / import_historical.py at the moment each document is
-inserted — NOT reconstructed here. This script only adjusts
+collect_data.py / import_historical.py. This script only adjusts
 archived_snapshots and live_snapshots after each run, plus a one-time
-migration seed (seed_total_snapshots_if_missing) for systems that already
-had data before these write-time counters existed.
+migration seed for systems that predate those write-time counters.
 
     stats = {
         "_id": "global",
@@ -33,12 +32,14 @@ had data before these write-time counters existed.
     }
 """
 
+import gc
 import os
 import sys
+import itertools
 from datetime import datetime, timedelta, timezone
-from collections import defaultdict
 
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from pymongo import MongoClient
 from loguru import logger
 
@@ -50,48 +51,83 @@ from ml.config import (
     ARCHIVE_SUBDIR_ODDS_SNAPSHOTS, DAILY_ARCHIVE_COMPRESSION,
 )
 
+# Documents per processing batch.  Tune downward on very low-RAM VMs.
+BATCH_SIZE = 500
+
 
 def get_db():
     client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=10_000)
     return client[DB_NAME]
 
 
-def partition_path(date: datetime) -> str:
+def partition_dir(date: datetime) -> str:
     """
-    Return the parquet file path for a given UTC date, under a
-    per-collection subfolder:
-        {ARCHIVE_DIR}/odds_snapshots/year=YYYY/month=MM/day=DD.parquet
-    The subfolder exists so a future second archived collection (e.g. if
-    line_movements or arb_history ever needs archiving too) never
-    collides with these files.
+    Directory that holds all batch files for a given UTC date:
+        {ARCHIVE_DIR}/odds_snapshots/year=YYYY/month=MM/day=DD/
     """
     return os.path.join(
         ARCHIVE_DIR,
         ARCHIVE_SUBDIR_ODDS_SNAPSHOTS,
         f"year={date.year:04d}",
         f"month={date.month:02d}",
-        f"day={date.day:02d}.parquet",
+        f"day={date.day:02d}",
     )
 
 
-def verify_parquet_write(path: str, expected_rows: int) -> bool:
+def batch_path(date: datetime, batch_num: int) -> str:
     """
-    Read the parquet file back and confirm row count matches what we
-    intended to write. This is the gate that decides whether it's safe
-    to delete the corresponding Mongo documents.
+    Full path for one batch file within a day's directory:
+        .../day=DD/batch_0000.parquet
+    Multiple batches for the same date are separate files — no existing
+    file is ever read or rewritten to append new rows.
+    """
+    return os.path.join(partition_dir(date), f"batch_{batch_num:04d}.parquet")
+
+
+def _normalize_doc(d: dict) -> dict:
+    """Convert Mongo-specific types to parquet-safe plain Python types."""
+    row = dict(d)
+    row["_id"] = str(row["_id"])
+    fa = row.get("fetched_at")
+    row["fetched_at"] = fa.isoformat() if hasattr(fa, "isoformat") else str(fa)
+    ct = row.get("commence_time")
+    if hasattr(ct, "isoformat"):
+        row["commence_time"] = ct.isoformat()
+    dup_of = row.get("duplicate_of")
+    if dup_of is not None:
+        row["duplicate_of"] = str(dup_of)
+    return row
+
+
+def _write_batch_parquet(rows: list, path: str) -> bool:
+    """
+    Write a batch of normalized row dicts directly via PyArrow — no
+    pandas DataFrame, no existing-file read. Returns True on success.
+    """
+    try:
+        table = pa.Table.from_pylist(rows)
+        pq.write_table(table, path, compression=DAILY_ARCHIVE_COMPRESSION)
+        return True
+    except Exception as e:
+        logger.error(f"Parquet write failed for {path}: {e}")
+        return False
+
+
+def _verify_batch_parquet(path: str, expected_rows: int) -> bool:
+    """
+    Verify row count via PyArrow file metadata — does NOT load any column
+    data into memory, just reads the footer's row-group statistics.
     """
     if not os.path.exists(path):
         logger.error(f"Verify failed — file does not exist: {path}")
         return False
     try:
-        written = pd.read_parquet(path, engine="pyarrow")
+        actual = pq.ParquetFile(path).metadata.num_rows
     except Exception as e:
-        logger.error(f"Verify failed — could not read back {path}: {e}")
+        logger.error(f"Verify failed — could not read metadata for {path}: {e}")
         return False
-    if len(written) < expected_rows:
-        logger.error(
-            f"Verify failed — {path} has {len(written)} rows, expected at least {expected_rows}"
-        )
+    if actual != expected_rows:
+        logger.error(f"Verify failed — {path} has {actual} rows, expected {expected_rows}")
         return False
     return True
 
@@ -99,25 +135,13 @@ def verify_parquet_write(path: str, expected_rows: int) -> bool:
 def update_stats(db, archived_delta: int):
     """
     Update archived_snapshots and live_snapshots after an archive run.
-
-    Deliberately does NOT touch total_snapshots here. That field is an
-    all-time counter owned exclusively by the write-time $inc calls in
-    collect_data.py and import_historical.py, at the actual moment each
-    document is inserted — this function has no visibility into how many
-    new live documents were collected since the last archive run, so any
-    attempt to reconstruct total_snapshots from (live_count + archived
-    delta) here would silently under-count it between archive runs. This
-    was a real bug in an earlier version of this function, caught by
-    testing a realistic multi-run scenario rather than by code review
-    alone — see the corresponding patch notes if this comment is ever
-    removed and someone is tempted to "simplify" this back.
+    Does NOT touch total_snapshots — that field is owned exclusively by
+    write-time $inc calls in collect_data.py / import_historical.py.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     live_count = db[COL_ODDS_SNAPSHOTS].count_documents({})
-
     existing = db[COL_STATS].find_one({"_id": "global"})
     new_archived = (existing.get("archived_snapshots", 0) if existing else 0) + archived_delta
-
     db[COL_STATS].update_one(
         {"_id": "global"},
         {"$set": {
@@ -129,29 +153,21 @@ def update_stats(db, archived_delta: int):
     )
     total_for_log = existing.get("total_snapshots", "unknown") if existing else "unknown"
     logger.info(
-        f"stats updated — archived={new_archived:,} live={live_count:,} (total_snapshots={total_for_log}, owned by write-time counters)"
+        f"stats updated — archived={new_archived:,} live={live_count:,} "
+        f"(total_snapshots={total_for_log}, owned by write-time counters)"
     )
 
 
 def seed_total_snapshots_if_missing(db):
     """
-    One-time migration safety net. On a system that already had documents
-    in odds_snapshots BEFORE the write-time $inc counters were added to
-    collect_data.py / import_historical.py, total_snapshots would never
-    get seeded — those older documents were written without incrementing
-    it. Without this, /health would silently fall back to the live-only
-    count forever, even after archival starts running for real.
-
-    Runs once: if total_snapshots is missing entirely, seed it from the
-    current live count (correct, since at the moment this first runs on
-    such a system, nothing has been archived yet either — live_count IS
-    the true total at that instant). After this point, every future
-    document increments it correctly at write time, so this only ever
-    needs to fire once per deployment, ever.
+    One-time migration seed for systems that predate the write-time $inc
+    counters. Runs once: if total_snapshots is absent, seeds it from the
+    current live count. After this, every inserted document increments it
+    at write time via collect_data.py / import_historical.py.
     """
     existing = db[COL_STATS].find_one({"_id": "global"})
     if existing and "total_snapshots" in existing:
-        return  # already seeded — normal path, nothing to do
+        return
     live_count = db[COL_ODDS_SNAPSHOTS].count_documents({})
     db[COL_STATS].update_one(
         {"_id": "global"},
@@ -159,9 +175,18 @@ def seed_total_snapshots_if_missing(db):
         upsert=True,
     )
     logger.warning(
-        f"total_snapshots was missing — seeded one-time from current live count ({live_count:,}). "
-        f"This should only happen once, on the first run after deploying the archival system."
+        f"total_snapshots was missing — seeded from current live count ({live_count:,}). "
+        f"This should only happen once, on first run after deploying the archival system."
     )
+
+
+def _iter_batches(cursor, size: int):
+    """Yield successive slices of `size` from a MongoDB cursor."""
+    while True:
+        batch = list(itertools.islice(cursor, size))
+        if not batch:
+            break
+        yield batch
 
 
 def archive_snapshots():
@@ -169,89 +194,95 @@ def archive_snapshots():
     seed_total_snapshots_if_missing(db)
     cutoff = datetime.now(timezone.utc) - timedelta(days=LIVE_RETENTION_DAYS)
 
-    logger.info(f"Archiving odds_snapshots older than {cutoff.isoformat()}")
+    logger.info(
+        f"Archiving odds_snapshots older than {cutoff.isoformat()} "
+        f"in batches of {BATCH_SIZE}"
+    )
 
-    old_docs = list(db[COL_ODDS_SNAPSHOTS].find({"fetched_at": {"$lt": cutoff}}))
-    if not old_docs:
+    # count_documents is a cheap server-side aggregation — no documents
+    # are transferred to Python just to get this number.
+    eligible = db[COL_ODDS_SNAPSHOTS].count_documents({"fetched_at": {"$lt": cutoff}})
+    if eligible == 0:
         logger.info("Nothing to archive — no documents older than the retention window.")
         update_stats(db, archived_delta=0)
         return {"archived": 0, "partitions": 0}
 
-    logger.info(f"Found {len(old_docs):,} documents eligible for archival")
+    logger.info(f"{eligible:,} documents eligible for archival")
 
-    # Group by UTC calendar date of fetched_at — each date becomes one
-    # parquet partition file.
-    by_date = defaultdict(list)
-    for doc in old_docs:
-        fetched_at = doc.get("fetched_at")
-        if isinstance(fetched_at, str):
-            fetched_at = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
-        if fetched_at.tzinfo is None:
-            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
-        date_key = fetched_at.date()
-        by_date[date_key].append(doc)
+    # batch_size() controls how many documents MongoDB sends to Python per
+    # network round-trip — the cursor itself is lazy and holds no more than
+    # batch_size documents in RAM at a time.
+    cursor = db[COL_ODDS_SNAPSHOTS].find(
+        {"fetched_at": {"$lt": cutoff}}
+    ).batch_size(BATCH_SIZE)
 
-    total_archived = 0
-    ids_to_delete  = []
+    total_archived  = 0
+    partition_dates: set = set()
+    # Per-date counters so multiple batches for the same date get unique filenames
+    batch_counters: dict = {}
 
-    for date_key, docs in sorted(by_date.items()):
-        path = partition_path(datetime(date_key.year, date_key.month, date_key.day))
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+    for batch_num, batch_docs in enumerate(_iter_batches(cursor, BATCH_SIZE)):
+        logger.info(f"Batch {batch_num + 1}: {len(batch_docs)} docs")
 
-        # Mongo ObjectId / datetime objects aren't directly parquet-friendly —
-        # normalize to plain strings before handing to pandas/pyarrow.
-        rows = []
-        for d in docs:
-            row = dict(d)
-            row["_id"] = str(row["_id"])
-            fa = row.get("fetched_at")
-            row["fetched_at"] = fa.isoformat() if hasattr(fa, "isoformat") else str(fa)
-            ct = row.get("commence_time")
-            if hasattr(ct, "isoformat"):
-                row["commence_time"] = ct.isoformat()
-            dup_of = row.get("duplicate_of")
-            if dup_of is not None:
-                row["duplicate_of"] = str(dup_of)
-            rows.append(row)
-
-        new_df = pd.DataFrame(rows)
-
-        # If a partition file already exists for this date (e.g. a previous
-        # partial run, or same-day re-archival), append rather than
-        # overwrite, so we never lose previously-archived rows for that day.
-        if os.path.exists(path):
-            try:
-                existing_df = pd.read_parquet(path, engine="pyarrow")
-                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-            except Exception as e:
-                logger.error(f"Could not read existing partition {path}, aborting this date: {e}")
+        # Group this batch by calendar date
+        by_date: dict = {}
+        for doc in batch_docs:
+            fetched_at = doc.get("fetched_at")
+            if isinstance(fetched_at, str):
+                fetched_at = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+            if fetched_at is None:
                 continue
-        else:
-            combined_df = new_df
+            if hasattr(fetched_at, "tzinfo") and fetched_at.tzinfo is None:
+                fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+            date_key = fetched_at.date()
+            by_date.setdefault(date_key, []).append(doc)
 
-        try:
-            combined_df.to_parquet(path, engine="pyarrow", compression=DAILY_ARCHIVE_COMPRESSION, index=False)
-        except Exception as e:
-            logger.error(f"Write failed for {path}: {e}")
-            continue
+        batch_verified_ids = []
 
-        expected_total_rows_for_file = len(combined_df)
-        if not verify_parquet_write(path, expected_total_rows_for_file):
-            logger.error(f"Skipping deletion for {date_key} — write could not be verified")
-            continue
+        for date_key, docs in sorted(by_date.items()):
+            dt = datetime(date_key.year, date_key.month, date_key.day)
+            file_idx = batch_counters.get(date_key, 0)
+            path = batch_path(dt, file_idx)
+            batch_counters[date_key] = file_idx + 1
+            os.makedirs(os.path.dirname(path), exist_ok=True)
 
-        # Only NOW do we mark these specific Mongo _ids as safe to delete.
-        ids_to_delete.extend(d["_id"] for d in docs)
-        total_archived += len(docs)
-        logger.success(f"Archived {len(docs):,} docs → {path} (verified)")
+            rows = [_normalize_doc(d) for d in docs]
 
-    if ids_to_delete:
-        result = db[COL_ODDS_SNAPSHOTS].delete_many({"_id": {"$in": ids_to_delete}})
-        logger.success(f"Deleted {result.deleted_count:,} verified-archived documents from Mongo")
+            if not _write_batch_parquet(rows, path):
+                logger.error(f"Skipping {date_key} batch {file_idx} — write failed")
+                continue
+
+            if not _verify_batch_parquet(path, len(rows)):
+                logger.error(f"Skipping {date_key} batch {file_idx} — verify failed")
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                continue
+
+            # Only here — after verified write — do we queue these IDs for deletion
+            batch_verified_ids.extend(d["_id"] for d in docs)
+            total_archived += len(docs)
+            partition_dates.add(date_key)
+            logger.success(f"  {len(docs)} docs → {path} (verified)")
+
+        # Delete only this batch's verified documents — not a global accumulation
+        if batch_verified_ids:
+            res = db[COL_ODDS_SNAPSHOTS].delete_many(
+                {"_id": {"$in": batch_verified_ids}}
+            )
+            logger.info(f"  Deleted {res.deleted_count:,} from Mongo (batch {batch_num + 1})")
+
+        # Release this batch's memory before fetching the next one
+        del batch_docs, by_date, batch_verified_ids, rows
+        gc.collect()
 
     update_stats(db, archived_delta=total_archived)
-
-    return {"archived": total_archived, "partitions": len(by_date)}
+    logger.success(
+        f"Archive complete — {total_archived:,} docs across "
+        f"{len(partition_dates)} partition date(s)"
+    )
+    return {"archived": total_archived, "partitions": len(partition_dates)}
 
 
 if __name__ == "__main__":
