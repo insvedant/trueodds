@@ -20,18 +20,22 @@ const { protect, adminOnly } = require('../middleware/auth')
 router.get('/', async (req, res) => {
   try {
     const promo = await Promotion.getSingleton()
+    const plain = promo.toObject()
 
-    const expired = promo.endsAt && new Date(promo.endsAt) < new Date()
-    const isLive  = promo.active && !expired
+    const expired = plain.endsAt && new Date(plain.endsAt) < new Date()
+    const isLive  = plain.active && !expired
 
     res.json({
-      success: true,
-      active:  isLive,
-      title:    promo.title,
-      subtitle: promo.subtitle,
-      endsAt:   promo.endsAt,
-      // Only expose sale prices when the sale is actually live.
-      displayPrices: isLive ? promo.displayPrices : null,
+      success:      true,
+      active:       isLive,
+      // Also expose the raw flag so frontend can distinguish
+      // "admin turned it on but endsAt is in the past" from "admin turned it off"
+      adminActive:  plain.active,
+      expired:      !!expired,
+      title:        plain.title,
+      subtitle:     plain.subtitle,
+      endsAt:       plain.endsAt,
+      displayPrices: isLive ? plain.displayPrices : null,
     })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
@@ -42,7 +46,7 @@ router.get('/', async (req, res) => {
 router.get('/admin', protect, adminOnly, async (req, res) => {
   try {
     const promo = await Promotion.getSingleton()
-    res.json({ success: true, promotion: promo })
+    res.json({ success: true, promotion: promo.toObject() })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
   }
@@ -59,16 +63,6 @@ router.put('/', protect, adminOnly, async (req, res) => {
     if (subtitle !== undefined)      promo.subtitle = subtitle
     if (endsAt !== undefined)        promo.endsAt = endsAt ? new Date(endsAt) : null
 
-    if (coupons && typeof coupons === 'object') {
-      promo.coupons = {
-        basic_monthly:    coupons.basic_monthly    ?? promo.coupons.basic_monthly,
-        basic_yearly:     coupons.basic_yearly     ?? promo.coupons.basic_yearly,
-        gold_monthly:     coupons.gold_monthly     ?? promo.coupons.gold_monthly,
-        gold_yearly:      coupons.gold_yearly      ?? promo.coupons.gold_yearly,
-        platinum_monthly: coupons.platinum_monthly ?? promo.coupons.platinum_monthly,
-        platinum_yearly:  coupons.platinum_yearly  ?? promo.coupons.platinum_yearly,
-      }
-    }
     if (displayPrices && typeof displayPrices === 'object') {
       const merge = (planKey) => ({
         monthly: displayPrices[planKey]?.monthly ?? promo.displayPrices[planKey]?.monthly ?? 0,
@@ -79,12 +73,27 @@ router.put('/', protect, adminOnly, async (req, res) => {
         gold:     merge('gold'),
         platinum: merge('platinum'),
       }
+      // Mongoose doesn't auto-detect changes to nested plain objects —
+      // markModified is required or .save() silently skips these fields.
+      promo.markModified('displayPrices')
+    }
+
+    if (coupons && typeof coupons === 'object') {
+      promo.coupons = {
+        basic_monthly:    coupons.basic_monthly    ?? promo.coupons.basic_monthly,
+        basic_yearly:     coupons.basic_yearly     ?? promo.coupons.basic_yearly,
+        gold_monthly:     coupons.gold_monthly     ?? promo.coupons.gold_monthly,
+        gold_yearly:      coupons.gold_yearly      ?? promo.coupons.gold_yearly,
+        platinum_monthly: coupons.platinum_monthly ?? promo.coupons.platinum_monthly,
+        platinum_yearly:  coupons.platinum_yearly  ?? promo.coupons.platinum_yearly,
+      }
+      promo.markModified('coupons')
     }
 
     promo.updatedAt = new Date()
     await promo.save()
 
-    res.json({ success: true, promotion: promo })
+    res.json({ success: true, promotion: promo.toObject() })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
   }
