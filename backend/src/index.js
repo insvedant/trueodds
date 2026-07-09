@@ -42,16 +42,27 @@ app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500, message: { succ
 app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: { success: false, message: 'Too many login attempts. Please wait 15 minutes.' } }))
 app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }))
 
+function priceStatus(envVal) {
+  if (!envVal) return 'missing'
+  if (envVal.startsWith('price_')) return 'set'
+  // looks like something is in the var, but it's not a valid Stripe Price ID
+  return 'invalid'
+}
+
 app.get('/health', (req, res) => res.json({
   status:   'ok',
   env:      process.env.NODE_ENV || 'development',
   db:       mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
   stripe:   process.env.STRIPE_SECRET_KEY?.startsWith('sk_') ? 'configured' : 'missing',
+  stripeWebhook: process.env.STRIPE_WEBHOOK_SECRET?.startsWith('whsec_') ? 'configured' : 'missing',
   zoho:     (process.env.ZOHO_USER && process.env.ZOHO_PASSWORD) ? 'configured' : 'missing',
   telegram: (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) ? 'configured' : 'missing',
-  stripeBasic:    (process.env.STRIPE_PRICE_BASIC_MONTHLY || process.env.STRIPE_PRICE_BASIC)    ? 'set' : 'missing',
-  stripeGold:     (process.env.STRIPE_PRICE_GOLD_MONTHLY  || process.env.STRIPE_PRICE_GOLD)     ? 'set' : 'missing',
-  stripePlatinum: (process.env.STRIPE_PRICE_PLATINUM_MONTHLY || process.env.STRIPE_PRICE_PLATINUM) ? 'set' : 'missing',
+  stripeBasicMonthly:    priceStatus(process.env.STRIPE_PRICE_BASIC_MONTHLY),
+  stripeBasicYearly:     priceStatus(process.env.STRIPE_PRICE_BASIC_YEARLY),
+  stripeGoldMonthly:     priceStatus(process.env.STRIPE_PRICE_GOLD_MONTHLY),
+  stripeGoldYearly:      priceStatus(process.env.STRIPE_PRICE_GOLD_YEARLY),
+  stripePlatinumMonthly: priceStatus(process.env.STRIPE_PRICE_PLATINUM_MONTHLY),
+  stripePlatinumYearly:  priceStatus(process.env.STRIPE_PRICE_PLATINUM_YEARLY),
 }))
 
 app.get('/api/health', (req, res) => res.redirect('/health'))
