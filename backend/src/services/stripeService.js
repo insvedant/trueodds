@@ -9,9 +9,9 @@ const stripe = Stripe(
 const TRIAL_DAYS = 7
 
 const PRICE_IDS = {
-  basic:    process.env.STRIPE_PRICE_BASIC    || 'price_REPLACE_BASIC_MONTHLY',
-  gold:     process.env.STRIPE_PRICE_GOLD     || 'price_REPLACE_GOLD_MONTHLY',
-  platinum: process.env.STRIPE_PRICE_PLATINUM || 'price_REPLACE_PLATINUM_MONTHLY',
+  basic:    process.env.STRIPE_PRICE_BASIC_MONTHLY    || 'price_REPLACE_BASIC_MONTHLY',
+  gold:     process.env.STRIPE_PRICE_GOLD_MONTHLY     || 'price_REPLACE_GOLD_MONTHLY',
+  platinum: process.env.STRIPE_PRICE_PLATINUM_MONTHLY || 'price_REPLACE_PLATINUM_MONTHLY',
   basic_yearly:    process.env.STRIPE_PRICE_BASIC_YEARLY    || 'price_REPLACE_BASIC_YEARLY',
   gold_yearly:     process.env.STRIPE_PRICE_GOLD_YEARLY     || 'price_REPLACE_GOLD_YEARLY',
   platinum_yearly: process.env.STRIPE_PRICE_PLATINUM_YEARLY || 'price_REPLACE_PLATINUM_YEARLY',
@@ -49,16 +49,12 @@ async function createSubscriptionWithTrial({ name, email, planId, paymentMethodI
     const saleLive = promo.active && !expired
 
     if (saleLive) {
-      // Build the exact key matching the 6-coupon schema:
-      //   basic         → basic_monthly
-      //   basic_yearly  → basic_yearly
-      //   gold          → gold_monthly
-      //   gold_yearly   → gold_yearly  ... etc.
-      const isYearly = planId.endsWith('_yearly')
-      const basePlan = planId.replace('_yearly', '')
-      const couponKey = `${basePlan}_${isYearly ? 'yearly' : 'monthly'}`
-      const couponId = promo.coupons?.[couponKey]
+      const basePlan = planId.replace('_yearly', '') // basic_yearly -> basic
+      const couponId = promo.coupons?.[basePlan]
       if (couponId) {
+        // Confirm the coupon is still valid on Stripe's side too — handles
+        // the case where it expired or hit max redemptions even if our own
+        // `active` flag is stale.
         const stripeCoupon = await stripe.coupons.retrieve(couponId)
         if (stripeCoupon.valid) coupon = couponId
       }
