@@ -41,6 +41,24 @@ const userSchema = new mongoose.Schema({
   discordId:       { type: String, default: null, sparse: true },
   discordUsername: { type: String, default: null },
 
+  // IP / location tracking (captured at signup, refreshed at subscribe)
+  signupIp:       { type: String, default: null },
+  signupLocation: {
+    city:        { type: String, default: null },
+    region:      { type: String, default: null },
+    country:     { type: String, default: null },
+    countryCode: { type: String, default: null },
+    timezone:    { type: String, default: null },
+  },
+  subscribeIp:       { type: String, default: null },
+  subscribeLocation: {
+    city:        { type: String, default: null },
+    region:      { type: String, default: null },
+    country:     { type: String, default: null },
+    countryCode: { type: String, default: null },
+    timezone:    { type: String, default: null },
+  },
+
   isActive:   { type: Boolean, default: true },
   lastLogin:  Date,
   loginCount: { type: Number, default: 0 },
