@@ -6,6 +6,7 @@ const crypto  = require('crypto')
 const User    = require('../models/User')
 const { protect }  = require('../middleware/auth')
 const { sendPasswordResetEmail, sendWelcomeEmail } = require('../services/emailService')
+const { getLocationFromIp } = require('../services/geoService')
 const { logActivity } = require('../services/logActivity')
 
 const sign = (id) => jwt.sign({ id }, process.env.JWT_SECRET, {
@@ -58,6 +59,13 @@ router.post('/register', async (req, res) => {
     sendWelcomeEmail(user.email, user.name, user.plan).catch(err =>
       console.warn('[Email] Welcome email failed:', err.message)
     )
+
+    // Fire-and-forget: don't block signup response on a third-party geo lookup
+    getLocationFromIp(req.ip).then(loc => {
+      user.signupIp = req.ip
+      user.signupLocation = loc
+      return user.save({ validateBeforeSave: false })
+    }).catch(err => console.warn('[Geo] signup location save failed:', err.message))
 
     logActivity({ type:'signup', user, ip: req.ip, message:`New signup: ${user.email}`, meta:{ plan: user.plan, referral: referralCode||null } })
 
