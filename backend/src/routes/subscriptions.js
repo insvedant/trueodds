@@ -12,6 +12,8 @@ const {
   cancelSubscription,
   createSetupIntent,
 } = require('../services/stripeService')
+const { sendSubscriptionConfirmationEmail, sendOwnerNewSubscriberAlert } = require('../services/emailService')
+const { getLocationFromIp } = require('../services/geoService')
 
 router.get('/plans', (req, res) => {
   res.json({
@@ -135,6 +137,19 @@ router.post('/create-with-trial', protect, async (req, res) => {
 
     const meta  = PLAN_META[planId]
     const price = billingPeriod === 'yearly' ? meta.yearlyTotal : meta.price
+
+    sendSubscriptionConfirmationEmail(req.user.email, req.user.name, planId, billingPeriod, price)
+      .catch(err => console.warn('[Email] Subscription confirmation failed:', err.message))
+    sendOwnerNewSubscriberAlert({ name: req.user.name, email: req.user.email, plan: planId, billingPeriod, price })
+      .catch(err => console.warn('[Email] Owner subscriber alert failed:', err.message))
+
+    // Fire-and-forget: capture where the actual subscribe (card entry) happened from
+    getLocationFromIp(req.ip).then(loc => {
+      req.user.subscribeIp = req.ip
+      req.user.subscribeLocation = loc
+      return req.user.save({ validateBeforeSave: false })
+    }).catch(err => console.warn('[Geo] subscribe location save failed:', err.message))
+
     res.json({
       success: true,
       message: `${meta.name} ${billingPeriod} trial started. Card charged $${price} on ${result.trialEnd.toLocaleDateString()}.`,
