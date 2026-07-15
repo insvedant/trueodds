@@ -283,6 +283,128 @@ async function getPositiveEV(minEV = 0, sport = null) {
   return { data: evBets, source }
 }
 
+async function getMiddles(minGapPoints = 1, sport = null) {
+  const key = `middles:${sport || 'all'}:${minGapPoints}`
+  const mem = memGet(key)
+  if (mem) return { data: mem, source: 'mem' }
+  const cached = await Cache.get(key)
+  if (cached) { memSet(key, cached, TTL.ODDS); return { data: cached, source: 'cache' } }
+
+  let odds = []
+  let source = 'api'
+  const SPREAD_SPORTS = ['americanfootball_cfl', 'americanfootball_nfl', 'icehockey_nhl']
+
+  if (sport) {
+    const sportKey = getSportKey(sport)
+    const markets = ['NHL', 'CFL', 'NFL'].includes(sport) ? ['spreads', 'totals'] : ['totals']
+    const results = await Promise.allSettled(markets.map(m => getOdds(sportKey, m)))
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.data?.length) {
+        odds.push(...r.value.data)
+        source = r.value.source
+      }
+    }
+  } else {
+    const fetches = []
+    for (const s of SPORTS) {
+      if (SPREAD_SPORTS.includes(s)) fetches.push(getOdds(s, 'spreads'))
+      fetches.push(getOdds(s, 'totals'))
+    }
+    const results = await Promise.allSettled(fetches)
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.data?.length) {
+        odds.push(...r.value.data)
+        source = r.value.source
+      }
+    }
+  }
+
+  const middles = calcMiddles(odds, minGapPoints)
+  if (middles.length > 0) {
+    await Cache.set(key, middles, TTL.ODDS, source)
+    memSet(key, middles, TTL.ODDS)
+  }
+  return { data: middles, source }
+}
+
+async function getBookRankings() {
+  const key = 'book-rankings:all'
+  const mem = memGet(key)
+  if (mem) return { data: mem, source: 'mem' }
+  const cached = await Cache.get(key)
+  if (cached) { memSet(key, cached, TTL.ODDS); return { data: cached, source: 'cache' } }
+
+  const { data: odds, source } = await getAllOdds()
+  const rankings = calcBookRanking(odds)
+  if (rankings.length > 0) {
+    await Cache.set(key, rankings, TTL.ODDS, source)
+    memSet(key, rankings, TTL.ODDS)
+  }
+  return { data: rankings, source }
+}
+
+async function getKeyNumberWatch(sport = null) {
+  const key = `key-numbers:${sport || 'all'}`
+  const mem = memGet(key)
+  if (mem) return { data: mem, source: 'mem' }
+  const cached = await Cache.get(key)
+  if (cached) { memSet(key, cached, TTL.ODDS); return { data: cached, source: 'cache' } }
+
+  let odds = []
+  let source = 'api'
+  const SPREAD_SPORTS = ['americanfootball_cfl', 'americanfootball_nfl', 'icehockey_nhl']
+
+  if (sport) {
+    const sportKey = getSportKey(sport)
+    const results = await Promise.allSettled([getOdds(sportKey, 'spreads'), getOdds(sportKey, 'totals')])
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.data?.length) {
+        odds.push(...r.value.data)
+        source = r.value.source
+      }
+    }
+  } else {
+    const fetches = []
+    for (const s of SPORTS) {
+      if (SPREAD_SPORTS.includes(s)) fetches.push(getOdds(s, 'spreads'))
+      fetches.push(getOdds(s, 'totals'))
+    }
+    const results = await Promise.allSettled(fetches)
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.data?.length) {
+        odds.push(...r.value.data)
+        source = r.value.source
+      }
+    }
+  }
+
+  const flags = calcKeyNumberWatch(odds)
+  if (flags.length > 0) {
+    await Cache.set(key, flags, TTL.ODDS, source)
+    memSet(key, flags, TTL.ODDS)
+  }
+  return { data: flags, source }
+}
+
+async function getNoVig(sport = null) {
+  const key = `no-vig:${sport || 'all'}`
+  const mem = memGet(key)
+  if (mem) return { data: mem, source: 'mem' }
+  const cached = await Cache.get(key)
+  if (cached) { memSet(key, cached, TTL.ODDS); return { data: cached, source: 'cache' } }
+
+  const { data: odds, source } = sport
+    ? await getOdds(getSportKey(sport), 'h2h')
+    : await getAllOdds()
+
+  const noVig = calcNoVig(odds)
+  if (noVig.length > 0) {
+    await Cache.set(key, noVig, TTL.ODDS, source)
+    memSet(key, noVig, TTL.ODDS)
+  }
+  return { data: noVig, source }
+}
+
 async function getScores(sport = 'NBA') {
   const key = `scores:${sport}`
 
@@ -406,6 +528,7 @@ function transformOdds(games, sportKey, market) {
     })
     .map(game => {
     const allBooks = {}
+    const allPoints = {}
 
     for (const bm of game.bookmakers || []) {
       const mkt = (bm.markets || []).find(m => m.key === market)
@@ -413,6 +536,10 @@ function transformOdds(games, sportKey, market) {
       for (const outcome of mkt.outcomes) {
         if (!allBooks[outcome.name]) allBooks[outcome.name] = {}
         allBooks[outcome.name][bm.key] = outcome.price
+        if (outcome.point !== undefined && outcome.point !== null) {
+          if (!allPoints[outcome.name]) allPoints[outcome.name] = {}
+          allPoints[outcome.name][bm.key] = outcome.point
+        }
       }
     }
 
@@ -430,6 +557,10 @@ function transformOdds(games, sportKey, market) {
         books: Object.fromEntries(
           Object.entries(books).map(([k, v]) => [k, v > 0 ? `+${v}` : `${v}`])
         ),
+        // Per-book point/line (spreads & totals only — undefined for h2h).
+        // Additive field: doesn't change shape for existing consumers (Arb/+EV)
+        // that never read it.
+        points: allPoints[selection] || {},
       }
     })
 
@@ -576,6 +707,182 @@ function calcEV(games, minEV = 0) {
   return evBets.sort((a, b) => b.ev - a.ev)
 }
 
+// ─── Middles ────────────────────────────────────────────────────────────────
+// A middle exists on a 2-outcome spread/total market when the two books'
+// points for opposite sides overlap — e.g. Team A -2.5 at Book X and
+// Team B +4.5 at Book Y. Both bets win if the final margin lands in the gap.
+function calcMiddles(games, minGapPoints = 1) {
+  const middles = []
+
+  for (const game of games) {
+    for (const mkt of game.markets || []) {
+      const rows = mkt.rows || []
+      if (rows.length !== 2) continue
+      const [rowA, rowB] = rows
+      const pointsA = rowA.points || {}
+      const pointsB = rowB.points || {}
+      if (!Object.keys(pointsA).length || !Object.keys(pointsB).length) continue
+
+      let best = null
+      for (const [bookA, ptA] of Object.entries(pointsA)) {
+        for (const [bookB, ptB] of Object.entries(pointsB)) {
+          if (bookA === bookB) continue // need two separate books to place both legs
+          const gap = ptA + ptB // > 0 means the ranges overlap — a middle
+          if (gap > 0 && (!best || gap > best.gap)) {
+            best = { gap, bookA, bookB, pointA: ptA, pointB: ptB }
+          }
+        }
+      }
+
+      if (best && best.gap >= minGapPoints) {
+        middles.push({
+          id:      `${game.id}_${mkt.name}_middle`,
+          game:    game.game,
+          sport:   game.sport,
+          league:  game.league || '',
+          market:  mkt.name,
+          gap:     Math.round(best.gap * 100) / 100,
+          legA: {
+            selection: rowA.selection, book: best.bookA,
+            point: best.pointA, odds: rowA.books[best.bookA],
+          },
+          legB: {
+            selection: rowB.selection, book: best.bookB,
+            point: best.pointB, odds: rowB.books[best.bookB],
+          },
+          time: game.time,
+          hot:  best.gap >= 3,
+        })
+      }
+    }
+  }
+
+  return middles.sort((a, b) => b.gap - a.gap)
+}
+
+// ─── Sportsbook Value Ranking ──────────────────────────────────────────────
+// Ranks books by average overround (vig/margin) across every 2-way market
+// where that book quotes both sides. Lower margin = better long-run value.
+function calcBookRanking(games) {
+  const bookMargins = {}
+
+  for (const game of games) {
+    for (const mkt of game.markets || []) {
+      const rows = mkt.rows || []
+      if (rows.length < 2) continue
+      const bookSets = rows.map(r => new Set(Object.keys(r.books || {})))
+      const commonBooks = [...bookSets[0]].filter(b => bookSets.every(s => s.has(b)))
+
+      for (const book of commonBooks) {
+        const impliedSum = rows.reduce((s, r) => {
+          const odds = parseInt(r.books[book]) || 0
+          return s + (odds ? 1 / dec(odds) : 0)
+        }, 0)
+        if (!impliedSum) continue
+        const marginPct = (impliedSum - 1) * 100
+        if (!bookMargins[book]) bookMargins[book] = { sum: 0, count: 0 }
+        bookMargins[book].sum   += marginPct
+        bookMargins[book].count += 1
+      }
+    }
+  }
+
+  return Object.entries(bookMargins)
+    .filter(([, v]) => v.count >= 3) // skip books with too small a sample to be meaningful
+    .map(([book, v]) => ({
+      book,
+      avgMargin:  Math.round((v.sum / v.count) * 100) / 100,
+      sampleSize: v.count,
+    }))
+    .sort((a, b) => a.avgMargin - b.avgMargin)
+}
+
+// ─── Key Number Watch ───────────────────────────────────────────────────────
+// Flags spread/total lines currently sitting on or within half a point of a
+// sport's statistically significant "key numbers" — the numbers a
+// disproportionate share of final margins/totals land on exactly.
+// NOTE: this is proximity, not true crossing-detection (which needs point
+// history the collector doesn't store yet — see backend/ml/collect_data.py).
+const KEY_NUMBERS = {
+  NFL: [3, 7, 10, 6, 4],
+  CFL: [3, 7, 10],
+  NBA: [], // no strong key numbers in basketball — spreads move continuously
+  NHL: [1, 2],
+  MLB: [1, 1.5],
+}
+
+function calcKeyNumberWatch(games) {
+  const flags = []
+
+  for (const game of games) {
+    const keyNums = KEY_NUMBERS[game.sport] || []
+    if (!keyNums.length) continue
+
+    for (const mkt of game.markets || []) {
+      for (const row of mkt.rows || []) {
+        for (const [book, point] of Object.entries(row.points || {})) {
+          const abs = Math.abs(point)
+          for (const key of keyNums) {
+            const dist = Math.abs(abs - key)
+            if (dist <= 0.5) {
+              flags.push({
+                id:        `${game.id}_${mkt.name}_${row.selection}_${book}`,
+                game:      game.game,
+                sport:     game.sport,
+                market:    mkt.name,
+                selection: row.selection,
+                book,
+                point,
+                keyNumber: key,
+                distance:  Math.round(dist * 10) / 10,
+                onNumber:  dist === 0,
+                odds:      row.books[book],
+                time:      game.time,
+              })
+              break // only flag the nearest key number per line
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return flags.sort((a, b) => a.distance - b.distance)
+}
+
+// ─── No-Vig / Fair Odds Display ────────────────────────────────────────────
+// Surfaces getFairOdds() as a standalone view: true win probability with the
+// book's margin stripped out, next to what every tracked book is actually offering.
+function calcNoVig(games) {
+  const out = []
+
+  for (const game of games) {
+    for (const mkt of game.markets || []) {
+      for (const row of mkt.rows || []) {
+        const fair = getFairOdds(row.books)
+        if (!fair) continue
+        const { fairOdds, sharpBook } = fair
+        const trueProb = 1 / dec(fairOdds)
+
+        out.push({
+          id:        `${game.id}_${mkt.name}_${row.selection}`,
+          game:      game.game,
+          sport:     game.sport,
+          market:    mkt.name,
+          selection: row.selection,
+          fairOdds:  fairOdds > 0 ? `+${fairOdds}` : `${fairOdds}`,
+          fairProb:  `${(trueProb * 100).toFixed(1)}%`,
+          sharpBook,
+          books:     row.books,
+          time:      game.time,
+        })
+      }
+    }
+  }
+
+  return out
+}
+
 function getSportKey(label) {
   const map = {
     NFL:    'americanfootball_nfl',
@@ -617,4 +924,8 @@ module.exports = {
   getSportKey,
   isKeyConfigured,
   bustMemCache,
+  getMiddles,
+  getBookRankings,
+  getKeyNumberWatch,
+  getNoVig,
 }
