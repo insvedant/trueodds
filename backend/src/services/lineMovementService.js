@@ -16,7 +16,7 @@ function extractPricePoint(oddsValue) {
     return null;
 }
 async function getLineMovementSeries(eventId, market, selection = null) {
-    const col = mlCollection('odds_snapshots');
+    const col = await mlCollection('odds_snapshots');
     if (!col)
         return { available: false, series: [] };
     const marketKey = normalizeMarket(market);
@@ -67,7 +67,7 @@ async function getLineMovementSeries(eventId, market, selection = null) {
 // Latest snapshot that actually carries real book_odds (skips duplicate
 // markers automatically) — a direct proxy for the closing line.
 async function getClosingSnapshot(eventId) {
-    const col = mlCollection('odds_snapshots');
+    const col = await mlCollection('odds_snapshots');
     if (!col)
         return null;
     return col.find({ event_id: eventId, book_odds: { $exists: true } }).sort({ fetched_at: -1 }).limit(1).next();
@@ -99,7 +99,7 @@ function americanToDecimal(american) {
     return 1;
 }
 async function getSteamMoves(windowMinutes = 15, sport = null) {
-    const col = mlCollection('line_movements');
+    const col = await mlCollection('line_movements');
     if (!col)
         return { available: false, data: [] };
     const since = new Date(Date.now() - windowMinutes * 60 * 1000);
