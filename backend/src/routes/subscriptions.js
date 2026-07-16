@@ -88,6 +88,37 @@ router.get('/me', protect, (req, res) => {
         },
     });
 });
+
+// POST /api/subscriptions/init-card-setup — called right after registration,
+// before the card form even renders. Creates the Stripe Customer (once) and
+// a SetupIntent for it. The frontend uses the returned clientSecret with
+// stripe.confirmCardSetup() — that's the real, PCI-compliant tokenization
+// step, and it also transparently handles any 3D Secure / SCA challenge the
+// card issuer requires. Nothing here ever sees raw card details; those go
+// straight from the browser to Stripe over Stripe's own iframe.
+router.post('/init-card-setup', protect, async (req, res) => {
+    try {
+        let customerId = req.user.stripeCustomerId;
+        if (!customerId) {
+            const customer = await stripe.customers.create({ name: req.user.name, email: req.user.email });
+            customerId = customer.id;
+            req.user.stripeCustomerId = customerId;
+            await req.user.save({ validateBeforeSave: false });
+        }
+        const setupIntent = await createSetupIntent(customerId);
+        res.json({ success: true, clientSecret: setupIntent.client_secret });
+    }
+    catch (err) {
+        console.error('init-card-setup error:', err.message);
+        if (err.message?.includes('REPLACE_WITH')) {
+            // Dev mode — no real Stripe keys configured. Frontend detects this
+            // via devMode:true and skips straight to create-with-trial without
+            // ever loading Stripe Elements.
+            return res.json({ success: true, devMode: true, clientSecret: null });
+        }
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.post('/create-with-trial', protect, async (req, res) => {
     try {
         const { planId, paymentMethodId, billingPeriod = 'monthly' } = req.body;
@@ -97,12 +128,13 @@ router.post('/create-with-trial', protect, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Payment method required.' });
         if (req.user.stripeSubscriptionId)
             return res.status(400).json({ success: false, message: 'Active subscription already exists.' });
+        if (!req.user.stripeCustomerId)
+            return res.status(400).json({ success: false, message: 'Card setup was not completed — please try again.' });
         const priceKey = billingPeriod === 'yearly' ? `${planId}_yearly` : planId;
         const result = await createSubscriptionWithTrial({
-            name: req.user.name,
-            email: req.user.email,
-            planId: priceKey,
+            customerId: req.user.stripeCustomerId,
             paymentMethodId,
+            planId: priceKey,
         });
         req.user.plan = planId;
         req.user.subscriptionStatus = 'trial';
