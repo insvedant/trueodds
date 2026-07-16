@@ -1,58 +1,45 @@
-
-
-const nodemailer = require('nodemailer')
-
-const FROM_NAME    = 'TrueOdds'
-const FROM_ADDRESS = process.env.ZOHO_USER || 'support@trueodds.ca'
-
+const nodemailer = require('nodemailer');
+const FROM_NAME = 'TrueOdds';
+const FROM_ADDRESS = process.env.ZOHO_USER || 'support@trueodds.ca';
 function createTransporter() {
-  const user = process.env.ZOHO_USER
-  const pass = process.env.ZOHO_PASSWORD
-
-  if (!user || !pass) {
-    console.warn('[Email] Zoho not configured — emails will be logged to console only')
-    return null
-  }
-
-  return nodemailer.createTransport({
-    host:   'smtp.zoho.com',
-    port:   465,
-    secure: true,   
-    auth:   { user, pass },
-  })
+    const user = process.env.ZOHO_USER;
+    const pass = process.env.ZOHO_PASSWORD;
+    if (!user || !pass) {
+        console.warn('[Email] Zoho not configured — emails will be logged to console only');
+        return null;
+    }
+    return nodemailer.createTransport({
+        host: 'smtp.zoho.com',
+        port: 465,
+        secure: true,
+        auth: { user, pass },
+    });
 }
-
 async function sendEmail({ to, subject, html, text }) {
-  const transporter = createTransporter()
-
-  if (!transporter) {
-    
-    console.log('\n────────────────────────────────────')
-    console.log('[Email DEV MODE — not sent]')
-    console.log(`TO:      ${to}`)
-    console.log(`SUBJECT: ${subject}`)
-    console.log(`BODY:    ${text || html?.slice(0, 200)}`)
-    console.log('────────────────────────────────────\n')
-    return { success: true, devMode: true }
-  }
-
-  const info = await transporter.sendMail({
-    from:    `"${FROM_NAME}" <${FROM_ADDRESS}>`,
-    to,
-    subject,
-    html,
-    text,
-  })
-
-  console.log(`[Email] Sent to ${to} — MessageId: ${info.messageId}`)
-  return { success: true, messageId: info.messageId }
+    const transporter = createTransporter();
+    if (!transporter) {
+        console.log('\n────────────────────────────────────');
+        console.log('[Email DEV MODE — not sent]');
+        console.log(`TO:      ${to}`);
+        console.log(`SUBJECT: ${subject}`);
+        console.log(`BODY:    ${text || html?.slice(0, 200)}`);
+        console.log('────────────────────────────────────\n');
+        return { success: true, devMode: true };
+    }
+    const info = await transporter.sendMail({
+        from: `"${FROM_NAME}" <${FROM_ADDRESS}>`,
+        to,
+        subject,
+        html,
+        text,
+    });
+    console.log(`[Email] Sent to ${to} — MessageId: ${info.messageId}`);
+    return { success: true, messageId: info.messageId };
 }
-
 async function sendPasswordResetEmail(email, name, resetToken) {
-  const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca'
-  const resetUrl    = `${frontendUrl}/reset-password?token=${resetToken}`
-
-  const html = `
+    const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca';
+    const resetUrl = `${frontendUrl}/reset-password?token=${resetToken}`;
+    const html = `
     <!DOCTYPE html>
     <html>
     <head>
@@ -99,9 +86,8 @@ async function sendPasswordResetEmail(email, name, resetToken) {
       </div>
     </body>
     </html>
-  `
-
-  const text = `
+  `;
+    const text = `
 TrueOdds — Password Reset
 
 Hi ${name},
@@ -113,16 +99,13 @@ If you didn't request a password reset, ignore this email.
 
 — TrueOdds Team
 support@trueodds.ca
-  `.trim()
-
-  return sendEmail({ to: email, subject: 'Reset your TrueOdds password', html, text })
+  `.trim();
+    return sendEmail({ to: email, subject: 'Reset your TrueOdds password', html, text });
 }
-
 async function sendWelcomeEmail(email, name, plan) {
-  const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca'
-  const planLabel   = plan.charAt(0).toUpperCase() + plan.slice(1)
-
-  const html = `
+    const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca';
+    const planLabel = plan.charAt(0).toUpperCase() + plan.slice(1);
+    const html = `
     <!DOCTYPE html>
     <html>
     <head>
@@ -170,22 +153,19 @@ async function sendWelcomeEmail(email, name, plan) {
       </div>
     </body>
     </html>
-  `
-
-  return sendEmail({
-    to:      email,
-    subject: `Welcome to TrueOdds — your ${planLabel} trial is active 🎉`,
-    html,
-    text:    `Welcome to TrueOdds, ${name}! Your ${planLabel} trial is active. Visit ${frontendUrl}/dashboard to get started.`,
-  })
+  `;
+    return sendEmail({
+        to: email,
+        subject: `Welcome to TrueOdds — your ${planLabel} trial is active 🎉`,
+        html,
+        text: `Welcome to TrueOdds, ${name}! Your ${planLabel} trial is active. Visit ${frontendUrl}/dashboard to get started.`,
+    });
 }
-
 async function sendSubscriptionConfirmationEmail(email, name, plan, billingPeriod, price) {
-  const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca'
-  const planLabel    = plan.charAt(0).toUpperCase() + plan.slice(1)
-  const periodLabel  = billingPeriod === 'yearly' ? 'year' : 'month'
-
-  const html = `
+    const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca';
+    const planLabel = plan.charAt(0).toUpperCase() + plan.slice(1);
+    const periodLabel = billingPeriod === 'yearly' ? 'year' : 'month';
+    const html = `
     <!DOCTYPE html>
     <html>
     <head>
@@ -232,37 +212,30 @@ async function sendSubscriptionConfirmationEmail(email, name, plan, billingPerio
       </div>
     </body>
     </html>
-  `
-
-  return sendEmail({
-    to:      email,
-    subject: `You're subscribed — ${planLabel} plan confirmed 🎉`,
-    html,
-    text:    `You're subscribed to the ${planLabel} plan ($${price}/${periodLabel}). Your 7-day free trial has started. Visit ${frontendUrl}/dashboard.`,
-  })
+  `;
+    return sendEmail({
+        to: email,
+        subject: `You're subscribed — ${planLabel} plan confirmed 🎉`,
+        html,
+        text: `You're subscribed to the ${planLabel} plan ($${price}/${periodLabel}). Your 7-day free trial has started. Visit ${frontendUrl}/dashboard.`,
+    });
 }
-
 async function sendOwnerNewSubscriberAlert({ name, email, plan, billingPeriod, price }) {
-
-  // Send notification to all configured admin emails
-  const recipients = [
-    process.env.OWNER_EMAIL,
-    process.env.SEC_EMAIL,
-    process.env.ZOHO_USER,
-  ]
-    .filter(Boolean)                                          // remove empty values
-    .filter((addr, index, self) => self.indexOf(addr) === index) // remove duplicates
-    .join(', ')
-
-  if (!recipients) {
-    console.warn('[Email] No owner email configured — skipping new-subscriber owner alert')
-    return { success: false, skipped: true }
-  }
-
-  const planLabel   = plan.charAt(0).toUpperCase() + plan.slice(1)
-  const periodLabel = billingPeriod === 'yearly' ? 'year' : 'month'
-
-  const html = `
+    const recipients = [
+        process.env.OWNER_EMAIL,
+        process.env.SEC_EMAIL,
+        process.env.ZOHO_USER,
+    ]
+        .filter(Boolean)
+        .filter((addr, index, self) => self.indexOf(addr) === index)
+        .join(', ');
+    if (!recipients) {
+        console.warn('[Email] No owner email configured — skipping new-subscriber owner alert');
+        return { success: false, skipped: true };
+    }
+    const planLabel = plan.charAt(0).toUpperCase() + plan.slice(1);
+    const periodLabel = billingPeriod === 'yearly' ? 'year' : 'month';
+    const html = `
     <div style="font-family:-apple-system,sans-serif;max-width:480px;margin:0 auto;">
       <h2 style="margin-bottom:4px;">💰 New TrueOdds Subscriber</h2>
       <p style="color:#64748b;font-size:13px;margin-top:0;">
@@ -279,14 +252,65 @@ async function sendOwnerNewSubscriberAlert({ name, email, plan, billingPeriod, p
         This notification was automatically generated by the TrueOdds platform.
       </p>
     </div>
-  `
-
-  return sendEmail({
-    to:      recipients,
-    subject: `💰 New subscriber: ${name} — ${planLabel} (${periodLabel}ly)`,
-    html,
-    text:    `New subscriber: ${name} (${email}) — ${planLabel} plan, $${price}/${periodLabel}.`,
-  })
+  `;
+    return sendEmail({
+        to: recipients,
+        subject: `💰 New subscriber: ${name} — ${planLabel} (${periodLabel}ly)`,
+        html,
+        text: `New subscriber: ${name} (${email}) — ${planLabel} plan, $${price}/${periodLabel}.`,
+    });
 }
 
-module.exports = { sendEmail, sendPasswordResetEmail, sendWelcomeEmail, sendSubscriptionConfirmationEmail, sendOwnerNewSubscriberAlert }
+const LIFECYCLE_COPY = {
+    trial_converted: { emoji: '✅', title: 'Trial converted to paid', blurb: 'A 7-day trial just successfully converted — the card was charged.' },
+    payment_failed: { emoji: '⚠️', title: 'Trial payment failed', blurb: "A trial ended, but the card charge failed. This user's subscription is now past due." },
+    subscription_cancelled: { emoji: '❌', title: 'Subscription cancelled', blurb: 'A subscriber has cancelled — their plan has reverted to free.' },
+};
+
+// Fires for the three subscription lifecycle moments TrueOdds admins want
+// visibility on: a trial successfully converting to a paid charge, a trial's
+// charge failing, and a subscriber cancelling outright. Reuses the same
+// OWNER_EMAIL + SEC_EMAIL + ZOHO_USER recipient list as the new-subscriber alert.
+async function sendSubscriptionLifecycleEmail(eventType, { name, email, plan, amount = null }) {
+    const recipients = [
+        process.env.OWNER_EMAIL,
+        process.env.SEC_EMAIL,
+        process.env.ZOHO_USER,
+    ]
+        .filter(Boolean)
+        .filter((addr, index, self) => self.indexOf(addr) === index)
+        .join(', ');
+    if (!recipients) {
+        console.warn(`[Email] No owner email configured — skipping ${eventType} alert`);
+        return { success: false, skipped: true };
+    }
+
+    const copy = LIFECYCLE_COPY[eventType] || { emoji: '🔔', title: eventType, blurb: '' };
+    const planLabel = plan ? plan.charAt(0).toUpperCase() + plan.slice(1) : 'Unknown';
+    const dateStr = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+
+    const html = `
+    <div style="font-family:-apple-system,sans-serif;max-width:480px;margin:0 auto;">
+      <h2 style="margin-bottom:4px;">${copy.emoji} ${copy.title}</h2>
+      <p style="color:#64748b;font-size:13px;margin-top:0;">${copy.blurb}</p>
+      <table style="width:100%;font-size:14px;border-collapse:collapse;">
+        <tr><td style="padding:6px 0;color:#64748b;">Name</td><td style="padding:6px 0;font-weight:700;">${name}</td></tr>
+        <tr><td style="padding:6px 0;color:#64748b;">Email</td><td style="padding:6px 0;font-weight:700;">${email}</td></tr>
+        <tr><td style="padding:6px 0;color:#64748b;">Plan</td><td style="padding:6px 0;font-weight:700;">${planLabel}</td></tr>
+        ${amount !== null ? `<tr><td style="padding:6px 0;color:#64748b;">Amount</td><td style="padding:6px 0;font-weight:700;">$${amount}</td></tr>` : ''}
+        <tr><td style="padding:6px 0;color:#64748b;">Date</td><td style="padding:6px 0;font-weight:700;">${dateStr}</td></tr>
+      </table>
+      <br>
+      <p style="font-size:13px;color:#64748b;">This notification was automatically generated by the TrueOdds platform.</p>
+    </div>
+  `;
+
+    return sendEmail({
+        to: recipients,
+        subject: `${copy.emoji} ${copy.title}: ${name}`,
+        html,
+        text: `${copy.title}: ${name} (${email}) — ${planLabel} plan.${amount !== null ? ` Amount: $${amount}.` : ''}`,
+    });
+}
+
+module.exports = { sendEmail, sendPasswordResetEmail, sendWelcomeEmail, sendSubscriptionConfirmationEmail, sendOwnerNewSubscriberAlert, sendSubscriptionLifecycleEmail };
