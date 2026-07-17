@@ -1,355 +1,283 @@
-
-
-const router   = require('express').Router()
-const { protect, requirePlan } = require('../middleware/auth')
-const mongoose = require('mongoose')
-
-const ML_API = process.env.ML_API_URL || 'http://localhost:8000'
-
+const router = require('express').Router();
+const { protect, requirePlan } = require('../middleware/auth');
+const { mlCollection } = require('../services/mlDb');
+const ML_API = process.env.ML_API_URL || 'http://localhost:8000';
 async function mlFetch(path, options = {}) {
-  try {
-    const res = await fetch(`${ML_API}${path}`, {
-      ...options,
-      headers: { 'Content-Type': 'application/json', ...options.headers },
-      signal: AbortSignal.timeout(5000),
-    })
-    if (!res.ok) throw new Error(`ML API error: ${res.status}`)
-    return await res.json()
-  } catch (err) {
-    return { available: false, reason: err.message, offline: true }
-  }
+    try {
+        const res = await fetch(`${ML_API}${path}`, {
+            ...options,
+            headers: { 'Content-Type': 'application/json', ...options.headers },
+            signal: AbortSignal.timeout(5000),
+        });
+        if (!res.ok)
+            throw new Error(`ML API error: ${res.status}`);
+        return await res.json();
+    }
+    catch (err) {
+        return { available: false, reason: err.message, offline: true };
+    }
 }
-
 router.get('/health', async (req, res) => {
-  try {
-    const health = await mlFetch('/health')
-
-    // Explicitly use 'trueodds' db — mongoose.connection.db may point to wrong db
-    // if the URI doesn't include the database name
-    const db = mongoose.connection.useDb('trueodds', { useCache: true })
-
-    const withTimeout = (p, ms = 4000) =>
-      Promise.race([p, new Promise(r => setTimeout(() => r(0), ms))])
-
-    const [liveSnapshots, predictions, lineMovs, arbHistory, statsDoc] = await Promise.all([
-      withTimeout(db.collection('odds_snapshots').countDocuments()),
-      withTimeout(db.collection('ml_predictions').countDocuments()),
-      withTimeout(db.collection('line_movements').countDocuments()),
-      withTimeout(db.collection('arb_history').countDocuments()),
-      withTimeout(db.collection('stats').findOne({ _id: 'global' })),
-    ])
-
-    // total_snapshots is an all-time counter incremented at write time by
-    // ml/collect_data.py and ml/import_historical.py every time a
-    // document is inserted into odds_snapshots — NOT something this
-    // route or archive_snapshots.py computes. This is what the
-    // dashboard's "X snapshots collected" counter should show — it must
-    // NOT drop the moment old documents get deleted from Mongo after a
-    // successful archive run. Falls back to the live count if no stats
-    // doc exists yet (fresh deploy, before this counter was ever written).
-    const snapshots = (statsDoc && typeof statsDoc.total_snapshots === 'number')
-      ? statsDoc.total_snapshots
-      : liveSnapshots
-    const archivedSnapshots = statsDoc?.archived_snapshots || 0
-
-    res.json({
-      success: true,
-      ml_service: health.offline ? 'offline' : 'online',
-      data_pipeline: {
-        odds_snapshots:      snapshots,
-        live_snapshots:      liveSnapshots,
-        archived_snapshots:  archivedSnapshots,
-        last_archive:        statsDoc?.last_archive || null,
-        predictions:         predictions,
-        line_movements:      lineMovs,
-        arb_history:         arbHistory,
-        ready_for_ml:        snapshots >= 500,
-        status:              snapshots < 100  ? 'collecting'
-                           : snapshots < 500  ? 'building'
-                           : 'ready',
-      },
-      ml_health: health,
-    })
-  } catch (err) {
-    res.json({ success: false, message: err.message })
-  }
-})
-
+    try {
+        const health = await mlFetch('/health');
+        const withTimeout = (p, ms = 4000) => Promise.race([p, new Promise(r => setTimeout(() => r(0), ms))]);
+        const [snapCol, predCol, lineCol, arbCol] = await Promise.all([
+            mlCollection('odds_snapshots'), mlCollection('ml_predictions'),
+            mlCollection('line_movements'), mlCollection('arb_history'),
+        ]);
+        const [snapshots, predictions, lineMovs, arbHistory] = await Promise.all([
+            snapCol ? withTimeout(snapCol.countDocuments()) : 0,
+            predCol ? withTimeout(predCol.countDocuments()) : 0,
+            lineCol ? withTimeout(lineCol.countDocuments()) : 0,
+            arbCol ? withTimeout(arbCol.countDocuments()) : 0,
+        ]);
+        res.json({
+            success: true,
+            ml_service: health.offline ? 'offline' : 'online',
+            data_pipeline: {
+                odds_snapshots: snapshots,
+                predictions: predictions,
+                line_movements: lineMovs,
+                arb_history: arbHistory,
+                ready_for_ml: snapshots >= 500,
+                status: snapshots < 100 ? 'collecting'
+                    : snapshots < 500 ? 'building'
+                        : 'ready',
+            },
+            ml_health: health,
+        });
+    }
+    catch (err) {
+        res.json({ success: false, message: err.message });
+    }
+});
 router.get('/predictions/batch', protect, async (req, res) => {
-  try {
-    const db   = mongoose.connection.db
-    const now  = new Date()
-    const ago  = new Date(now - 48 * 60 * 60 * 1000) 
-
-    const predictions = await db.collection('ml_predictions')
-      .find({ generated_at: { $gte: ago.toISOString() } }, { projection: { _id: 0 } })
-      .sort({ generated_at: -1 })
-      .limit(20)
-      .toArray()
-
-    
-    const final = predictions.length > 0 ? predictions :
-      await db.collection('ml_predictions')
-        .find({}, { projection: { _id: 0 } })
-        .sort({ generated_at: -1 })
-        .limit(20)
-        .toArray()
-
-    res.json({ success: true, count: final.length, predictions: final })
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message })
-  }
-})
-
+    try {
+        const col = await mlCollection('ml_predictions');
+        if (!col)
+            return res.json({ success: true, count: 0, predictions: [], offline: true });
+        const now = new Date();
+        const ago = new Date(now - 48 * 60 * 60 * 1000);
+        const predictions = await col
+            .find({ generated_at: { $gte: ago.toISOString() } }, { projection: { _id: 0 } })
+            .sort({ generated_at: -1 })
+            .limit(20)
+            .toArray();
+        const final = predictions.length > 0 ? predictions :
+            await col
+                .find({}, { projection: { _id: 0 } })
+                .sort({ generated_at: -1 })
+                .limit(20)
+                .toArray();
+        res.json({ success: true, count: final.length, predictions: final });
+    }
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.get('/predictions/:eventId', protect, async (req, res) => {
-  try {
-    const db   = mongoose.connection.db
-    const pred = await db.collection('ml_predictions').findOne(
-      { event_id: req.params.eventId },
-      { projection: { _id: 0 } }
-    )
-
-    if (pred) {
-      return res.json({ success: true, source: 'cache', prediction: pred })
+    try {
+        const col = await mlCollection('ml_predictions');
+        const pred = col ? await col.findOne({ event_id: req.params.eventId }, { projection: { _id: 0 } }) : null;
+        if (pred) {
+            return res.json({ success: true, source: 'cache', prediction: pred });
+        }
+        const live = await mlFetch(`/predictions/${req.params.eventId}`);
+        res.json({ success: true, source: 'live', prediction: live });
     }
-
-    
-    const live = await mlFetch(`/predictions/${req.params.eventId}`)
-    res.json({ success: true, source: 'live', prediction: live })
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message })
-  }
-})
-
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.get('/sharp-money', protect, async (req, res) => {
-  try {
-    const data = await mlFetch('/sharp-money')
-    if (!data.offline && data.count > 0) {
-      return res.json({ success: true, ...data })
+    try {
+        const data = await mlFetch('/sharp-money');
+        if (!data.offline && data.count > 0) {
+            return res.json({ success: true, ...data });
+        }
+        const apiService = require('../services/apiService');
+        const { data: allOdds } = await apiService.getAllOdds().catch(() => ({ data: [] }));
+        const events = [];
+        for (const game of (allOdds || []).slice(0, 30)) {
+            const mkt = (game.markets || [])[0];
+            const rows = mkt?.rows || [];
+            if (rows.length < 2)
+                continue;
+            for (const row of rows) {
+                const best = parseInt(String(row.bestOdds || '0').replace('+', ''));
+                const avg = parseInt(String(row.avgOdds || '0').replace('+', ''));
+                if (!best || !avg)
+                    continue;
+                const toProb = o => o > 0 ? 100 / (o + 100) : Math.abs(o) / (Math.abs(o) + 100);
+                const probDiff = Math.abs(toProb(best) - toProb(avg));
+                if (probDiff < 0.02)
+                    continue;
+                const direction = best > avg ? 'up' : 'down';
+                const movement = best - avg;
+                const projected = best + Math.round(movement * 0.6);
+                const projStr = projected > 0 ? `+${projected}` : String(projected);
+                const currentStr = best > 0 ? `+${best}` : String(best);
+                const bookCount = Object.keys(row.books || {}).length;
+                const accuracy = Math.min(78, 52 + bookCount * 4);
+                const urgencyMinutes = probDiff > 0.06 ? 15 : probDiff > 0.04 ? 30 : 60;
+                events.push({
+                    event_id: `${game.id}_${row.selection}`,
+                    sport: game.sport || '',
+                    game: game.game || '',
+                    home: game.game?.split(' vs ')[0] || '',
+                    away: game.game?.split(' vs ')[1] || '',
+                    market: mkt?.name || 'Moneyline',
+                    selection: row.selection,
+                    generated_at: new Date().toISOString(),
+                    sharp_money: {
+                        available: true,
+                        is_sharp: true,
+                        probability: parseFloat((0.52 + probDiff * 8).toFixed(3)),
+                        signal_strength: probDiff > 0.06 ? 'strong' : probDiff > 0.04 ? 'moderate' : 'weak',
+                        direction,
+                        from_line: currentStr,
+                        to_line: projStr,
+                        accuracy,
+                        urgency_minutes: urgencyMinutes,
+                    },
+                });
+            }
+        }
+        events.sort((a, b) => b.sharp_money.probability - a.sharp_money.probability);
+        const top = events.slice(0, 20);
+        res.json({ success: true, count: top.length, events: top, source: 'live_fallback' });
     }
-
-    // Fallback: derive line movement signals from live odds
-    const apiService = require('../services/apiService')
-    const { data: allOdds } = await apiService.getAllOdds().catch(() => ({ data: [] }))
-    const events = []
-
-    for (const game of (allOdds || []).slice(0, 30)) {
-      const mkt  = (game.markets || [])[0]
-      const rows = mkt?.rows || []
-      if (rows.length < 2) continue
-
-      for (const row of rows) {
-        const best = parseInt(String(row.bestOdds || '0').replace('+',''))
-        const avg  = parseInt(String(row.avgOdds  || '0').replace('+',''))
-        if (!best || !avg) continue
-
-        // Convert to implied prob to find real spread
-        const toProb = o => o > 0 ? 100/(o+100) : Math.abs(o)/(Math.abs(o)+100)
-        const probDiff = Math.abs(toProb(best) - toProb(avg))
-        if (probDiff < 0.02) continue  // < 2% prob shift — skip
-
-        const direction = best > avg ? 'up' : 'down'
-        // Estimate where line is heading: project movement beyond best
-        const movement   = best - avg
-        const projected  = best + Math.round(movement * 0.6)
-        const projStr    = projected > 0 ? `+${projected}` : String(projected)
-        const currentStr = best > 0 ? `+${best}` : String(best)
-
-        // Accuracy based on book count (more books = sharper signal)
-        const bookCount = Object.keys(row.books || {}).length
-        const accuracy  = Math.min(78, 52 + bookCount * 4)
-
-        // Urgency based on magnitude of movement
-        const urgencyMinutes = probDiff > 0.06 ? 15 : probDiff > 0.04 ? 30 : 60
-
-        events.push({
-          event_id: `${game.id}_${row.selection}`,
-          sport:    game.sport || '',
-          game:     game.game  || '',
-          home:     game.game?.split(' vs ')[0] || '',
-          away:     game.game?.split(' vs ')[1] || '',
-          market:   mkt?.name || 'Moneyline',
-          selection: row.selection,
-          generated_at: new Date().toISOString(),
-          sharp_money: {
-            available:       true,
-            is_sharp:        true,
-            probability:     parseFloat((0.52 + probDiff * 8).toFixed(3)),
-            signal_strength: probDiff > 0.06 ? 'strong' : probDiff > 0.04 ? 'moderate' : 'weak',
-            direction,
-            from_line:      currentStr,
-            to_line:        projStr,
-            accuracy,
-            urgency_minutes: urgencyMinutes,
-          },
-        })
-      }
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
     }
-
-    events.sort((a, b) => b.sharp_money.probability - a.sharp_money.probability)
-    const top = events.slice(0, 10)
-    res.json({ success: true, count: top.length, events: top, source: 'live_fallback' })
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message })
-  }
-})
-
+});
 router.get('/arb-windows', protect, async (req, res) => {
-  try {
-    const data = await mlFetch('/arb-windows')
-    if (!data.offline && data.count > 0) {
-      return res.json({ success: true, ...data })
+    try {
+        const data = await mlFetch('/arb-windows');
+        if (!data.offline && data.count > 0) {
+            return res.json({ success: true, ...data });
+        }
+        const apiService = require('../services/apiService');
+        const { data: allArbs } = await apiService.getArbitrage(0.5, null).catch(() => ({ data: [] }));
+        const arbs = (allArbs || []).slice(0, 20).map((a, i) => {
+            const profit = a.profit || 0;
+            const urgency = profit >= 4 ? 'critical' : profit >= 2.5 ? 'high' : profit >= 1.5 ? 'medium' : 'low';
+            const probMap = { critical: 88, high: 72, medium: 55, low: 38 };
+            const timeMap = { critical: 'Now', high: '5–15 min', medium: '15–45 min', low: '45–90 min' };
+            const legs = a.legs || [];
+            const books = legs.map(l => (l.book || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()));
+            return {
+                event_id: a.id || String(i),
+                game: a.game || '',
+                sport: (a.sport || '').replace(/.*_/, '').toUpperCase(),
+                market: a.market || 'Moneyline',
+                profit_pct: profit,
+                legs,
+                books: books.slice(0, 2),
+                probability: probMap[urgency],
+                expectedIn: timeMap[urgency],
+                prepTip: books.length >= 2
+                    ? `Have accounts funded at ${books.slice(0, 2).join(' & ')}. Place both legs simultaneously.`
+                    : 'Prepare accounts at both books. Act within 60s of spotting the window.',
+                window: { urgency, available: true },
+            };
+        });
+        res.json({ success: true, count: arbs.length, arbs, source: 'live_fallback' });
     }
-
-    // Fallback: use live arbitrage data
-    const apiService = require('../services/apiService')
-    const { data: allArbs } = await apiService.getArbitrage(0.5, null).catch(() => ({ data: [] }))
-    const arbs = (allArbs || []).slice(0, 10).map((a, i) => {
-      const profit  = a.profit || 0
-      const urgency = profit >= 4 ? 'critical' : profit >= 2.5 ? 'high' : profit >= 1.5 ? 'medium' : 'low'
-      const probMap = { critical: 88, high: 72, medium: 55, low: 38 }
-      const timeMap = { critical: 'Now', high: '5–15 min', medium: '15–45 min', low: '45–90 min' }
-      const legs    = a.legs || []
-      const books   = legs.map(l => (l.book || '').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()))
-      return {
-        event_id:    a.id || String(i),
-        game:        a.game || '',
-        sport:       (a.sport||'').replace(/.*_/,'').toUpperCase(),
-        market:      a.market || 'Moneyline',
-        profit_pct:  profit,
-        legs,
-        books:       books.slice(0,2),
-        probability: probMap[urgency],
-        expectedIn:  timeMap[urgency],
-        prepTip:     books.length >= 2
-          ? `Have accounts funded at ${books.slice(0,2).join(' & ')}. Place both legs simultaneously.`
-          : 'Prepare accounts at both books. Act within 60s of spotting the window.',
-        window: { urgency, available: true },
-      }
-    })
-    res.json({ success: true, count: arbs.length, arbs, source: 'live_fallback' })
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message })
-  }
-})
-
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.post('/score-ev', protect, requirePlan('platinum'), async (req, res) => {
-  try {
-    const data = await mlFetch('/predict/ev', {
-      method: 'POST',
-      body:   JSON.stringify(req.body),
-    })
-    res.json({ success: true, ...data })
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message })
-  }
-})
-
-router.get('/insights', protect, async (req, res) => {
-  try {
-    const db  = mongoose.connection.db
-    const uid = req.user._id.toString()
-
-    // Try ML service first
-    const mlData = await mlFetch(`/insights/${uid}`)
-    if (!mlData.offline && mlData.available !== false) {
-      return res.json({ success: true, ...mlData })
+    try {
+        const data = await mlFetch('/predict/ev', {
+            method: 'POST',
+            body: JSON.stringify(req.body),
+        });
+        res.json({ success: true, ...data });
     }
-
-    // Fallback: compute from Bet collection directly
-    const Bet = require('../models/Bet')
-    const bets = await Bet.find({ user: req.user._id }).lean()
-    const settled = bets.filter(b => b.result !== 'pending')
-    const wins    = settled.filter(b => b.result === 'win')
-    const totalStake  = settled.reduce((s, b) => s + (b.stake  || 0), 0)
-    const totalProfit = settled.reduce((s, b) => s + (b.profit || 0), 0)
-
-    // Sport breakdown
-    const sportMap = {}
-    settled.forEach(b => {
-      const s = b.sport || 'Other'
-      if (!sportMap[s]) sportMap[s] = { bets: 0, wins: 0, profit: 0 }
-      sportMap[s].bets++
-      if (b.result === 'win') sportMap[s].wins++
-      sportMap[s].profit += b.profit || 0
-    })
-    const sport_breakdown = Object.entries(sportMap)
-      .map(([sport, d]) => ({ sport, ...d, winRate: d.bets ? +(d.wins / d.bets * 100).toFixed(1) : 0 }))
-      .sort((a, b) => b.profit - a.profit)
-
-    res.json({
-      success: true,
-      source: 'db',
-      total_bets:   bets.length,
-      settled_bets: settled.length,
-      wins:         wins.length,
-      total_stake:  +totalStake.toFixed(2),
-      total_profit: +totalProfit.toFixed(2),
-      roi:          totalStake ? +(totalProfit / totalStake * 100).toFixed(1) : 0,
-      win_rate:     settled.length ? +(wins.length / settled.length * 100).toFixed(1) : 0,
-      sport_breakdown,
-    })
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message })
-  }
-})
-
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+router.get('/insights', protect, async (req, res) => {
+    try {
+        const uid = req.user._id.toString();
+        const mlData = await mlFetch(`/insights/${uid}`);
+        if (!mlData.offline && mlData.available !== false) {
+            return res.json({ success: true, ...mlData });
+        }
+        const Bet = require('../models/Bet');
+        const bets = await Bet.find({ user: req.user._id }).lean();
+        const settled = bets.filter(b => b.result !== 'pending');
+        const wins = settled.filter(b => b.result === 'win');
+        const totalStake = settled.reduce((s, b) => s + (b.stake || 0), 0);
+        const totalProfit = settled.reduce((s, b) => s + (b.profit || 0), 0);
+        const sportMap = {};
+        settled.forEach(b => {
+            const s = b.sport || 'Other';
+            if (!sportMap[s])
+                sportMap[s] = { bets: 0, wins: 0, profit: 0 };
+            sportMap[s].bets++;
+            if (b.result === 'win')
+                sportMap[s].wins++;
+            sportMap[s].profit += b.profit || 0;
+        });
+        const sport_breakdown = Object.entries(sportMap)
+            .map(([sport, d]) => ({ sport, ...d, winRate: d.bets ? +(d.wins / d.bets * 100).toFixed(1) : 0 }))
+            .sort((a, b) => b.profit - a.profit);
+        res.json({
+            success: true,
+            source: 'db',
+            total_bets: bets.length,
+            settled_bets: settled.length,
+            wins: wins.length,
+            total_stake: +totalStake.toFixed(2),
+            total_profit: +totalProfit.toFixed(2),
+            roi: totalStake ? +(totalProfit / totalStake * 100).toFixed(1) : 0,
+            win_rate: settled.length ? +(wins.length / settled.length * 100).toFixed(1) : 0,
+            sport_breakdown,
+        });
+    }
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.get('/dashboard', protect, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, message: 'Admin only' })
-  }
-
-  const db = mongoose.connection.db
-  const now = new Date()
-  const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000)
-
-  const [liveSnapshots, predictions, movements, arbs, trainingLog, statsDoc] = await Promise.all([
-    db.collection('odds_snapshots').countDocuments(),
-    db.collection('ml_predictions').countDocuments(),
-    db.collection('line_movements').countDocuments(),
-    db.collection('arb_history').countDocuments(),
-    db.collection('ml_training_log').find({}, { sort: { trained_at: -1 }, limit: 5 }).toArray(),
-    db.collection('stats').findOne({ _id: 'global' }),
-  ])
-
-  const snapshotsToday = await db.collection('odds_snapshots').countDocuments({
-    fetched_at: { $gte: oneDayAgo },
-  })
-
-  // total_snapshots is the all-time write-time counter (incremented in
-  // ml/collect_data.py / ml/import_historical.py at insertion time), so
-  // it includes everything ever collected, archived or not. It is NOT
-  // reconstructed by archive_snapshots.py — that script only adjusts
-  // archived_snapshots/live_snapshots after each run. snapshots_today
-  // intentionally stays as a pure live-Mongo count: it's measuring
-  // recent collection velocity, not an all-time total, and the 7-day
-  // retention window means nothing from the last 24h would ever have
-  // been archived anyway.
-  const snapshots = (statsDoc && typeof statsDoc.total_snapshots === 'number')
-    ? statsDoc.total_snapshots
-    : liveSnapshots
-
-  res.json({
-    success: true,
-    pipeline: {
-      total_snapshots:    snapshots,
-      live_snapshots:     liveSnapshots,
-      archived_snapshots: statsDoc?.archived_snapshots || 0,
-      last_archive:       statsDoc?.last_archive || null,
-      snapshots_today:    snapshotsToday,
-      total_predictions:  predictions,
-      line_movements:     movements,
-      arb_history:        arbs,
-      ml_ready:           snapshots >= 500,
-      data_status:        snapshots < 100  ? '🟡 Collecting data'
-                        : snapshots < 500  ? '🟠 Building dataset'
-                        : '🟢 ML Active',
-    },
-    recent_training: trainingLog.map(t => ({
-      trained_at: t.trained_at,
-      results:    t.results,
-    })),
-  })
-})
-
-module.exports = router
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ success: false, message: 'Admin only' });
+    }
+    const [snapCol, predCol, lineCol, arbCol, trainCol] = await Promise.all([
+        mlCollection('odds_snapshots'), mlCollection('ml_predictions'),
+        mlCollection('line_movements'), mlCollection('arb_history'), mlCollection('ml_training_log'),
+    ]);
+    const now = new Date();
+    const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000);
+    const [snapshots, predictions, movements, arbs, trainingLog] = await Promise.all([
+        snapCol ? snapCol.countDocuments() : 0,
+        predCol ? predCol.countDocuments() : 0,
+        lineCol ? lineCol.countDocuments() : 0,
+        arbCol ? arbCol.countDocuments() : 0,
+        trainCol ? trainCol.find({}).sort({ trained_at: -1 }).limit(5).toArray() : [],
+    ]);
+    const snapshotsToday = snapCol ? await snapCol.countDocuments({ fetched_at: { $gte: oneDayAgo } }) : 0;
+    res.json({
+        success: true,
+        pipeline: {
+            total_snapshots: snapshots,
+            snapshots_today: snapshotsToday,
+            total_predictions: predictions,
+            line_movements: movements,
+            arb_history: arbs,
+            ml_ready: snapshots >= 500,
+            data_status: snapshots < 100 ? '🟡 Collecting data'
+                : snapshots < 500 ? '🟠 Building dataset'
+                    : '🟢 ML Active',
+        },
+        recent_training: trainingLog.map(t => ({
+            trained_at: t.trained_at,
+            results: t.results,
+        })),
+    });
+});
+module.exports = router;
