@@ -111,7 +111,7 @@ def build_cross_book_features(book_odds: dict) -> dict:
     Build features from cross-book odds comparison.
     Captures disagreement between books as ML signal.
     """
-    h2h = book_odds.get("h2h", {})
+    h2h = book_odds.get("h2h") or {}
     features = {}
 
     for selection, books in h2h.items():
@@ -212,7 +212,7 @@ def build_features_for_event(event_id: str, db) -> dict | None:
         sort=[("fetched_at", 1)]
     )
 
-    book_odds   = snapshot.get("book_odds", {})
+    book_odds   = snapshot.get("book_odds") or {}
     commence    = snapshot.get("commence_time", "")
 
     features = {
@@ -232,9 +232,9 @@ def build_features_for_event(event_id: str, db) -> dict | None:
 
     
     if opening and opening["_id"] != snapshot["_id"]:
-        opening_odds = opening.get("book_odds", {})
-        h2h_curr = book_odds.get("h2h", {})
-        h2h_open = opening_odds.get("h2h", {})
+        opening_odds = opening.get("book_odds") or {}
+        h2h_curr = book_odds.get("h2h") or {}
+        h2h_open = opening_odds.get("h2h") or {}
 
         for sel in h2h_curr:
             if sel in h2h_open:
