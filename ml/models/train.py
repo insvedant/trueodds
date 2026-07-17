@@ -41,12 +41,6 @@ from ml.parquet_loader import load_historical_parquet
 
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# Zero-filled line-movement feature shape, copied verbatim from
-# features.build_line_movement_features()'s own no-movements-found return
-# value. Archived/Parquet-sourced events have no equivalent live
-# line_movements lookup available (that collection isn't archived), so we
-# fall back to this same "no movement data" shape rather than inventing a
-# different one that could silently mismatch columns at training time.
 _ZERO_MOVEMENT_FEATURES = {
     "total_movements":      0,
     "sharp_movements":      0,
@@ -64,24 +58,12 @@ def build_features_from_parquet_row(row: dict) -> dict | None:
     """
     Build the same feature shape as features.build_features_for_event(),
     but from a single archived Parquet row instead of a live Mongo query.
-    Used so historical (archived) events can still contribute training
-    rows after their snapshots have been moved out of odds_snapshots.
-
-    book_odds on a duplicate-marker row can come back as either plain
-    None (pandas/pyarrow fallback path) or pandas' pd.NA sentinel
-    (DuckDB path) depending on which loader served the row — verified
-    empirically, not assumed. `not book_odds` would raise
-    "TypeError: boolean value of NA is ambiguous" on the DuckDB case.
-    pd.NA is caught below by the final `not isinstance(book_odds, dict)`
-    check (pd.NA is neither None nor a float, so it falls through to
-    there) rather than by the pd.isna() clause, which exists separately
-    to catch plain float NaN if that sentinel ever shows up instead.
     """
     book_odds = row.get("book_odds")
     if book_odds is None or (isinstance(book_odds, float) and pd.isna(book_odds)) or not isinstance(book_odds, dict):
-        return None  # marker row with no real odds — nothing to build features from
+        return None
     if not book_odds:
-        return None  # empty dict — no markets present
+        return None
 
     commence = row.get("commence_time", "")
     features = {
@@ -96,14 +78,14 @@ def build_features_from_parquet_row(row: dict) -> dict | None:
     return features
 
 
-ROLLING_DAYS    = 30       
-MAX_SAMPLES     = 50_000   
+ROLLING_DAYS    = 30
+MAX_SAMPLES     = 50_000
 RANDOM_STATE    = 42
 
 CI_MODE             = os.environ.get('CI_TRAINING', '').lower() == 'true'
 N_ESTIMATORS_LARGE  = 50  if CI_MODE else 150
 N_ESTIMATORS_MEDIUM = 30  if CI_MODE else 100
-N_JOBS              = -1  
+N_JOBS              = -1
 
 logger.info(f"Training mode : {'CI-FAST' if CI_MODE else 'FULL'}")
 logger.info(f"Rolling window: last {ROLLING_DAYS} days")
@@ -115,11 +97,9 @@ def get_db():
     return client[DB_NAME]
 
 def cutoff_date() -> datetime:
-    """Return the rolling window cutoff — only data newer than this is used."""
     return datetime.now(timezone.utc) - timedelta(days=ROLLING_DAYS)
 
 def sample_if_large(X: pd.DataFrame, y: pd.Series, max_rows: int = MAX_SAMPLES):
-    """Randomly sample down to max_rows if dataset is too large."""
     if len(X) <= max_rows:
         return X, y
     logger.info(f"Dataset has {len(X):,} rows — sampling down to {max_rows:,}")
@@ -127,7 +107,6 @@ def sample_if_large(X: pd.DataFrame, y: pd.Series, max_rows: int = MAX_SAMPLES):
     return X.iloc[idx].reset_index(drop=True), y.iloc[idx].reset_index(drop=True)
 
 def save_model(model, name: str, metadata: dict = None):
-    """Save model + metadata to disk AND MongoDB."""
     path = os.path.join(MODEL_DIR, f"{name}.joblib")
     payload = {
         "model":      model,
@@ -163,7 +142,6 @@ def save_model(model, name: str, metadata: dict = None):
     return path
 
 def load_model(name: str):
-    """Load model from disk, fallback to MongoDB."""
     path = os.path.join(MODEL_DIR, f"{name}.joblib")
     if os.path.exists(path):
         return joblib.load(path)
@@ -186,15 +164,13 @@ def build_clv_dataset(db):
     logger.info("Building CLV dataset (30-day window, Mongo + Parquet merged)...")
     cutoff = cutoff_date()
 
-    # ── Live (Mongo) qualifying events — unchanged from before ───────────
-    # Events with >=5 snapshots still sitting in Mongo's rolling window.
     pipeline = [
         {"$match":  {"fetched_at": {"$gte": cutoff}}},
         {"$group":  {"_id": "$event_id", "count": {"$sum": 1},
                      "first": {"$first": "$fetched_at"},
                      "last":  {"$last":  "$fetched_at"}}},
         {"$match":  {"count": {"$gte": 5}}},
-        {"$limit":  10_000},   
+        {"$limit":  10_000},
     ]
     mongo_events = list(db[COL_ODDS_SNAPSHOTS].aggregate(pipeline, allowDiskUse=True))
     logger.info(f"CLV: {len(mongo_events)} live events in Mongo window")
@@ -203,15 +179,10 @@ def build_clv_dataset(db):
 
     for ev in mongo_events:
         eid     = ev["_id"]
-        # Opening line must be a real snapshot with book_odds — exclude
-        # duplicate markers directly in the query.
         opening = db[COL_ODDS_SNAPSHOTS].find_one(
             {"event_id": eid, "is_duplicate": {"$ne": True}},
             sort=[("fetched_at", 1)]
         )
-        # Closing may legitimately be the latest document even if it's a
-        # marker (odds were stable right up to close) — resolve it back to
-        # the real snapshot it points to so book_odds is never missing.
         closing = db[COL_ODDS_SNAPSHOTS].find_one({"event_id": eid}, sort=[("fetched_at", -1)])
         if closing and closing.get("is_duplicate"):
             real_closing = db[COL_ODDS_SNAPSHOTS].find_one({"_id": closing.get("duplicate_of")})
@@ -230,10 +201,15 @@ def build_clv_dataset(db):
 
         for sel in open_h2h:
             if sel in close_h2h:
-                common = set(open_h2h[sel]) & set(close_h2h[sel])
+                open_books  = open_h2h[sel]
+                close_books = close_h2h[sel]
+                if not open_books or not close_books:
+                    continue
+                common = set(open_books) & set(close_books)
+                common = {b for b in common if open_books[b] is not None and close_books[b] is not None}
                 if common:
-                    open_avg  = np.mean([american_to_decimal(open_h2h[sel][b])  for b in common])
-                    close_avg = np.mean([american_to_decimal(close_h2h[sel][b]) for b in common])
+                    open_avg  = np.mean([american_to_decimal(open_books[b])  for b in common])
+                    close_avg = np.mean([american_to_decimal(close_books[b]) for b in common])
                     shifts.append(close_avg - open_avg)
 
         if not shifts:
@@ -244,19 +220,6 @@ def build_clv_dataset(db):
         X_rows.append(row)
         y_vals.append(np.mean(shifts))
 
-    # ── Archived (Parquet) qualifying events ──────────────────────────────
-    # Anything older than LIVE_RETENTION_DAYS has already been moved out of
-    # Mongo by archive_snapshots.py. We still want it in the 30-day CLV
-    # training window, so load it from Parquet and group/process it the
-    # same way, entirely in pandas this time since there's no Mongo
-    # collection left to query for these events.
-    # Column pruning is CRITICAL here — the legacy parquet backup contains
-    # raw_bookmakers (several KB per row). Loading only the 4 fields we
-    # actually use avoids materializing that column into RAM and freezing
-    # the VM. DuckDB pushes this projection down before reading; the
-    # pandas fallback path passes it to read_parquet(columns=...) which
-    # pyarrow honours at the row-group level, so neither path loads
-    # raw_bookmakers regardless of which loader actually runs.
     CLV_PARQUET_COLS = ["event_id", "book_odds", "fetched_at", "is_duplicate"]
     archived = load_historical_parquet(
         cutoff_after=pd.Timestamp(cutoff),
@@ -282,12 +245,6 @@ def build_clv_dataset(db):
                     continue
 
                 shifts = []
-                # Defensive: archived_real was already filtered to non-null
-                # book_odds above, so these should always be real dicts —
-                # but pd.NA's truthiness raises TypeError rather than being
-                # falsy (`pd.NA or {}` crashes, unlike `None or {}`), so we
-                # guard explicitly rather than rely on the upstream filter
-                # never changing.
                 opening_bo = opening_row.get("book_odds")
                 closing_bo = closing_row.get("book_odds")
                 open_h2h  = opening_bo.get("h2h", {}) if isinstance(opening_bo, dict) else {}
@@ -295,10 +252,15 @@ def build_clv_dataset(db):
 
                 for sel in open_h2h:
                     if sel in close_h2h:
-                        common = set(open_h2h[sel]) & set(close_h2h[sel])
+                        open_books  = open_h2h[sel]
+                        close_books = close_h2h[sel]
+                        if not open_books or not close_books:
+                            continue
+                        common = set(open_books) & set(close_books)
+                        common = {b for b in common if open_books[b] is not None and close_books[b] is not None}
                         if common:
-                            open_avg  = np.mean([american_to_decimal(open_h2h[sel][b])  for b in common])
-                            close_avg = np.mean([american_to_decimal(close_h2h[sel][b]) for b in common])
+                            open_avg  = np.mean([american_to_decimal(open_books[b])  for b in common])
+                            close_avg = np.mean([american_to_decimal(close_books[b]) for b in common])
                             shifts.append(close_avg - open_avg)
 
                 if not shifts:
@@ -405,7 +367,6 @@ def train_sharp_money_model(db) -> dict:
     X, y = result
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=RANDOM_STATE)
 
-    
     model = HistGradientBoostingClassifier(
         max_iter=N_ESTIMATORS_LARGE,
         max_depth=4,
@@ -488,7 +449,6 @@ def train_arb_window_model(db) -> dict:
     X, y = result
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=RANDOM_STATE)
 
-    
     model = HistGradientBoostingRegressor(
         max_iter=N_ESTIMATORS_MEDIUM,
         max_depth=4,
@@ -513,17 +473,8 @@ def train_ev_confidence_model(db) -> dict:
         sort=[("fetched_at", -1)],
     ).limit(MAX_SAMPLES))
 
-    # Append archived (Parquet) rows from the same 30-day window so this
-    # model trains on the full rolling window even for events whose
-    # snapshots have already aged out of Mongo via archive_snapshots.py.
-    # Only rows with a real book_odds.h2h are usable — duplicate markers
-    # (book_odds is None after the parquet round-trip) are filtered out
-    # here rather than assumed absent.
     remaining_budget = MAX_SAMPLES - len(snapshots)
     if remaining_budget > 0:
-        # Same column pruning rationale as build_clv_dataset — only load
-        # the two fields actually consumed below. raw_bookmakers in the
-        # legacy backup must NOT be loaded into RAM.
         archived_df = load_historical_parquet(
             cutoff_after=pd.Timestamp(cutoff),
             columns=["event_id", "book_odds"],
@@ -569,7 +520,6 @@ def train_ev_confidence_model(db) -> dict:
                                for b, o in books.items() if b != book and o]
                 avg_other   = np.mean(other_probs) if other_probs else pin_prob
 
-                
                 X_rows.append({
                     "ev_pct":          ev_pct,
                     "pin_prob":        pin_prob,
@@ -585,7 +535,7 @@ def train_ev_confidence_model(db) -> dict:
                 ))
 
         if len(X_rows) >= MAX_SAMPLES:
-            break  
+            break
 
     if len(X_rows) < MIN_TRAINING_ROWS:
         return {"success": False, "reason": "insufficient_data"}
