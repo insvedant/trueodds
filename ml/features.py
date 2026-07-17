@@ -118,6 +118,14 @@ def build_cross_book_features(book_odds: dict) -> dict:
         if not books:
             continue
 
+        # Parquet-sourced archived rows can carry None for a book's price
+        # (odds pulled/unavailable at that snapshot) — drop those before any
+        # of the American->decimal conversions below, instead of patching
+        # each usage separately.
+        books = {b: o for b, o in books.items() if o is not None}
+        if not books:
+            continue
+
         odds_list = list(books.values())
         dec_list  = [american_to_decimal(o) for o in odds_list]
         prob_list = [1 / d for d in dec_list]
@@ -150,8 +158,14 @@ def build_cross_book_features(book_odds: dict) -> dict:
     
     all_best_probs = []
     for selection, books in h2h.items():
-        if books:
-            best_dec = max(american_to_decimal(o) for o in books.values())
+        if not books:
+            continue
+        # Same None-guard as above — this is a fresh, unfiltered read of
+        # h2h.items() again, so it needs its own filter rather than relying
+        # on the loop above having already cleaned it.
+        clean_books = {b: o for b, o in books.items() if o is not None}
+        if clean_books:
+            best_dec = max(american_to_decimal(o) for o in clean_books.values())
             all_best_probs.append(1 / best_dec)
 
     features["combined_implied_prob"] = sum(all_best_probs) if all_best_probs else 1.0
@@ -226,7 +240,15 @@ def build_features_for_event(event_id: str, db) -> dict | None:
             if sel in h2h_open:
                 curr_books = h2h_curr[sel]
                 open_books = h2h_open[sel]
-                common     = set(curr_books) & set(open_books)
+                # Both need to be real, non-empty dicts before we can build
+                # a set from them — either side can be missing/None for the
+                # same reason as build_cross_book_features above.
+                if not curr_books or not open_books:
+                    continue
+                common = set(curr_books) & set(open_books)
+                # Values within the common keys can still individually be
+                # None, so filter those out before converting to decimal.
+                common = {b for b in common if curr_books[b] is not None and open_books[b] is not None}
                 if common:
                     curr_avg = np.mean([american_to_decimal(curr_books[b]) for b in common])
                     open_avg = np.mean([american_to_decimal(open_books[b]) for b in common])
