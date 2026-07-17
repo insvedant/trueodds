@@ -196,8 +196,8 @@ def build_clv_dataset(db):
             continue
 
         shifts = []
-        open_h2h  = opening.get("book_odds", {}).get("h2h", {})
-        close_h2h = closing.get("book_odds", {}).get("h2h", {})
+        open_h2h  = (opening.get("book_odds") or {}).get("h2h") or {}
+        close_h2h = (closing.get("book_odds") or {}).get("h2h") or {}
 
         for sel in open_h2h:
             if sel in close_h2h:
@@ -247,8 +247,8 @@ def build_clv_dataset(db):
                 shifts = []
                 opening_bo = opening_row.get("book_odds")
                 closing_bo = closing_row.get("book_odds")
-                open_h2h  = opening_bo.get("h2h", {}) if isinstance(opening_bo, dict) else {}
-                close_h2h = closing_bo.get("h2h", {}) if isinstance(closing_bo, dict) else {}
+                open_h2h  = (opening_bo.get("h2h") or {}) if isinstance(opening_bo, dict) else {}
+                close_h2h = (closing_bo.get("h2h") or {}) if isinstance(closing_bo, dict) else {}
 
                 for sel in open_h2h:
                     if sel in close_h2h:
@@ -494,7 +494,7 @@ def train_ev_confidence_model(db) -> dict:
     X_rows, y_vals = [], []
 
     for snap in snapshots:
-        h2h = snap.get("book_odds", {}).get("h2h", {})
+        h2h = (snap.get("book_odds") or {}).get("h2h") or {}
         eid = snap.get("event_id", "")
 
         for selection, books in h2h.items():
