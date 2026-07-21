@@ -31,8 +31,9 @@ async function createSubscriptionWithTrial({ customerId, paymentMethodId, planId
         const expired = promo.endsAt && new Date(promo.endsAt) < new Date();
         const saleLive = promo.active && !expired;
         if (saleLive) {
+            const isYearly = planId.endsWith('_yearly');
             const basePlan = planId.replace('_yearly', '');
-            const couponId = promo.coupons?.[basePlan];
+            const couponId = isYearly ? promo.coupons?.[basePlan]?.yearly : promo.coupons?.[basePlan]?.monthly;
             if (couponId) {
                 const stripeCoupon = await stripe.coupons.retrieve(couponId);
                 if (stripeCoupon.valid)
