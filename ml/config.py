@@ -31,6 +31,8 @@ COL_ML_PREDICTIONS  = "ml_predictions"
 
 COL_FEATURE_STORE   = "feature_store"    
 
+COL_STATS           = "ml_stats"         
+
 
 
 ODDS_API_KEY  = os.getenv("THEODDSAPI_KEY", "")
