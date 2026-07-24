@@ -13,6 +13,7 @@ router.get('/', async (req, res) => {
             subtitle: promo.subtitle,
             endsAt: promo.endsAt,
             displayPrices: isLive ? promo.displayPrices : null,
+            extendedTrialDays: isLive ? promo.extendedTrialDays : 0,
         });
     }
     catch (err) {
@@ -30,7 +31,7 @@ router.get('/admin', protect, adminOnly, async (req, res) => {
 });
 router.put('/', protect, adminOnly, async (req, res) => {
     try {
-        const { active, title, subtitle, endsAt, coupons, displayPrices } = req.body;
+        const { active, title, subtitle, endsAt, coupons, displayPrices, extendedTrialDays } = req.body;
         const promo = await Promotion.getSingleton();
         if (typeof active === 'boolean')
             promo.active = active;
@@ -40,6 +41,10 @@ router.put('/', protect, adminOnly, async (req, res) => {
             promo.subtitle = subtitle;
         if (endsAt !== undefined)
             promo.endsAt = endsAt ? new Date(endsAt) : null;
+        if (extendedTrialDays !== undefined) {
+            const n = Number(extendedTrialDays);
+            promo.extendedTrialDays = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+        }
         if (coupons && typeof coupons === 'object') {
             const mergeCoupons = (planKey) => ({
                 monthly: coupons[planKey]?.monthly ?? promo.coupons[planKey]?.monthly ?? '',
