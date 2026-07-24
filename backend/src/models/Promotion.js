@@ -4,6 +4,12 @@ const promotionSchema = new mongoose.Schema({
     title: { type: String, default: 'Black Friday Sale' },
     subtitle: { type: String, default: 'Limited time — lock in your discount before it ends' },
     endsAt: { type: Date, default: null },
+    // 0 = use the normal TRIAL_DAYS from stripeService.js. When set and the
+    // promotion is active/not-expired, this overrides the trial length for
+    // every new signup on every plan — e.g. a weekend "free for a month"
+    // campaign. Reverts automatically once endsAt passes, same as the rest
+    // of this promotion.
+    extendedTrialDays: { type: Number, default: 0 },
     coupons: {
         basic: { monthly: { type: String, default: '' }, yearly: { type: String, default: '' } },
         gold: { monthly: { type: String, default: '' }, yearly: { type: String, default: '' } },
