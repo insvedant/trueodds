@@ -1,6 +1,6 @@
 const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_REPLACE_WITH_YOUR_STRIPE_SECRET_KEY');
-const TRIAL_DAYS = 7;
+const TRIAL_DAYS = 30;
 const PRICE_IDS = {
     basic: process.env.STRIPE_PRICE_BASIC_MONTHLY || 'price_REPLACE_BASIC_MONTHLY',
     gold: process.env.STRIPE_PRICE_GOLD_MONTHLY || 'price_REPLACE_GOLD_MONTHLY',
@@ -40,7 +40,7 @@ async function createSubscriptionWithTrial({ customerId, paymentMethodId, planId
                 if (stripeCoupon.valid)
                     coupon = couponId;
             }
-            if (promo.extendedTrialDays > 0)
+            if (promo.extendedTrialDays > trialDays)
                 trialDays = promo.extendedTrialDays;
         }
     }
