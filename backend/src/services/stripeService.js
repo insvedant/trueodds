@@ -25,6 +25,7 @@ async function createSubscriptionWithTrial({ customerId, paymentMethodId, planId
         invoice_settings: { default_payment_method: paymentMethodId },
     });
     let coupon = undefined;
+    let trialDays = TRIAL_DAYS;
     try {
         const Promotion = require('../models/Promotion');
         const promo = await Promotion.getSingleton();
@@ -39,15 +40,17 @@ async function createSubscriptionWithTrial({ customerId, paymentMethodId, planId
                 if (stripeCoupon.valid)
                     coupon = couponId;
             }
+            if (promo.extendedTrialDays > 0)
+                trialDays = promo.extendedTrialDays;
         }
     }
     catch (e) {
-        console.warn('[Promotion] coupon lookup failed, proceeding at full price:', e.message);
+        console.warn('[Promotion] coupon/trial-length lookup failed, proceeding with defaults:', e.message);
     }
     const subscription = await stripe.subscriptions.create({
         customer: customerId,
         items: [{ price: PRICE_IDS[planId] }],
-        trial_period_days: TRIAL_DAYS,
+        trial_period_days: trialDays,
         coupon,
         default_payment_method: paymentMethodId,
         payment_settings: {
