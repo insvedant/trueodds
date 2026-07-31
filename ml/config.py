@@ -33,6 +33,15 @@ COL_FEATURE_STORE   = "feature_store"
 
 COL_STATS           = "ml_stats"         
 
+# Cold-storage archival — moves odds_snapshots older than LIVE_RETENTION_DAYS
+# out of MongoDB and into local Parquet files, one batch file per day:
+#   {ARCHIVE_DIR}/{ARCHIVE_SUBDIR_ODDS_SNAPSHOTS}/year=YYYY/month=MM/day=DD/batch_NNNN.parquet
+# Matches the directory layout that already exists on the VM.
+ARCHIVE_DIR = "/home/ubuntu/data_archive"
+ARCHIVE_SUBDIR_ODDS_SNAPSHOTS = "odds_snapshots"
+LIVE_RETENTION_DAYS = 7
+DAILY_ARCHIVE_COMPRESSION = "snappy"
+
 
 
 ODDS_API_KEY  = os.getenv("THEODDSAPI_KEY", "")
