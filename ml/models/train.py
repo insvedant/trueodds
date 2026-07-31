@@ -407,6 +407,8 @@ def build_arb_window_dataset(db):
         "americanfootball_nfl": 1, "basketball_nba": 2,
         "baseball_mlb": 3, "icehockey_nhl": 4,
         "soccer_epl": 5, "mma_mixed_martial_arts": 6,
+        "americanfootball_ncaaf": 7, "basketball_wnba": 8,
+        "aussierules_afl": 9, "rugbyleague_nrl": 10,
     }
 
     X_rows, y_vals = [], []
