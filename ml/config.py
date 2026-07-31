@@ -41,6 +41,10 @@ ARCHIVE_DIR = "/home/ubuntu/data_archive"
 ARCHIVE_SUBDIR_ODDS_SNAPSHOTS = "odds_snapshots"
 LIVE_RETENTION_DAYS = 7
 DAILY_ARCHIVE_COMPRESSION = "snappy"
+# Older, pre-existing Parquet backup from before the current archive
+# structure — parquet_loader.py reads both locations when loading
+# historical data for training.
+LEGACY_ARCHIVE_DIR = "/home/ubuntu/parquet_backup"
 
 
 
@@ -125,4 +129,3 @@ ML_API_PORT = int(os.getenv("ML_API_PORT", "8000"))
 
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-
