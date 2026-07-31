@@ -15,12 +15,16 @@ const ALL_BOOKS = [
 const SPORTS = [
     'basketball_nba',
     'basketball_nba_championship_winner',
+    'basketball_wnba',
     'baseball_mlb',
     'icehockey_nhl',
     'icehockey_nhl_championship_winner',
     'americanfootball_nfl',
     'americanfootball_nfl_preseason',
     'americanfootball_cfl',
+    'americanfootball_ncaaf',
+    'aussierules_afl',
+    'rugbyleague_nrl',
     'soccer_epl',
     'soccer_uefa_champs_league',
     'soccer_uefa_europa_league',
@@ -452,8 +456,10 @@ function bustMemCache(prefix = 'odds:*') {
 const SPORT_LABELS = {
     americanfootball_nfl: 'NFL',
     americanfootball_nfl_super_bowl_winner: 'NFL',
+    americanfootball_ncaaf: 'NCAAF',
     basketball_nba: 'NBA',
     basketball_nba_championship_winner: 'NBA',
+    basketball_wnba: 'WNBA',
     baseball_mlb: 'MLB',
     icehockey_nhl: 'NHL',
     icehockey_nhl_championship_winner: 'NHL',
@@ -477,6 +483,8 @@ const SPORT_LABELS = {
     tennis_wta_us_open: 'Tennis',
     tennis_atp_wimbledon: 'Tennis',
     tennis_wta_wimbledon: 'Tennis',
+    aussierules_afl: 'AFL',
+    rugbyleague_nrl: 'NRL',
 };
 function transformOdds(games, sportKey, market) {
     const sport = SPORT_LABELS[sportKey] || sportKey;
@@ -810,13 +818,17 @@ function getSportKey(label) {
     const map = {
         NFL: 'americanfootball_nfl',
         CFL: 'americanfootball_cfl',
+        NCAAF: 'americanfootball_ncaaf',
         NBA: 'basketball_nba',
+        WNBA: 'basketball_wnba',
         MLB: 'baseball_mlb',
         NHL: 'icehockey_nhl',
         AHL: 'icehockey_ahl',
         Soccer: 'soccer_usa_mls',
         UFC: 'mma_mixed_martial_arts',
         Tennis: 'tennis_atp_french_open',
+        AFL: 'aussierules_afl',
+        NRL: 'rugbyleague_nrl',
     };
     return map[label] || 'baseball_mlb';
 }
@@ -824,13 +836,17 @@ function getMockSports() {
     return [
         { key: 'americanfootball_nfl', title: 'NFL', active: true },
         { key: 'americanfootball_cfl', title: 'CFL', active: true },
+        { key: 'americanfootball_ncaaf', title: 'NCAAF', active: true },
         { key: 'basketball_nba', title: 'NBA', active: true },
+        { key: 'basketball_wnba', title: 'WNBA', active: true },
         { key: 'baseball_mlb', title: 'MLB', active: true },
         { key: 'icehockey_nhl', title: 'NHL', active: true },
         { key: 'icehockey_ahl', title: 'AHL', active: true },
         { key: 'soccer_usa_mls', title: 'MLS Soccer', active: true },
         { key: 'soccer_canada_cpl', title: 'CPL Soccer', active: true },
         { key: 'mma_mixed_martial_arts', title: 'UFC/MMA', active: true },
+        { key: 'aussierules_afl', title: 'AFL', active: true },
+        { key: 'rugbyleague_nrl', title: 'NRL', active: true },
     ];
 }
 module.exports = {
