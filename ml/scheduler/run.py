@@ -30,6 +30,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from apscheduler.triggers.interval import IntervalTrigger
 
+from apscheduler.triggers.cron import CronTrigger
+
 from pymongo import MongoClient
 
 
@@ -113,6 +115,27 @@ async def job_train_models():
     except Exception as e:
 
         logger.error(f"[TRAIN] Failed: {e}")
+
+
+async def job_archive_snapshots():
+
+    """Move old odds_snapshots out of MongoDB into local Parquet files.
+
+    Was never wired into the scheduler before — Mongo storage grows
+
+    unbounded without this actually running on a schedule."""
+
+    try:
+
+        from ml.archive_snapshots import archive_snapshots as run_archival
+
+        result = run_archival()
+
+        logger.info(f"[ARCHIVE] {result}")
+
+    except Exception as e:
+
+        logger.error(f"[ARCHIVE] Failed: {e}")
 
 
 
@@ -201,7 +224,7 @@ async def main():
 
         job_import_historical_once,
 
-        trigger=IntervalTrigger(seconds=5),  
+        trigger=IntervalTrigger(hours=6),  
 
         id="import_historical",
 
@@ -257,7 +280,7 @@ async def main():
 
         job_train_models,
 
-        trigger=IntervalTrigger(hours=RETRAIN_INTERVAL_H),
+        trigger=CronTrigger(hour=0, minute=0),
 
         id="train_models",
 
@@ -266,6 +289,20 @@ async def main():
         coalesce=True,
 
         next_run_time=datetime.now(timezone.utc),
+
+    )
+
+    scheduler.add_job(
+
+        job_archive_snapshots,
+
+        trigger=CronTrigger(hour=0, minute=30),
+
+        id="archive_snapshots",
+
+        max_instances=1,
+
+        coalesce=True,
 
     )
 
@@ -316,3 +353,4 @@ async def main():
 if __name__ == "__main__":
 
     asyncio.run(main())
+
