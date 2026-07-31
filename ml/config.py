@@ -45,7 +45,11 @@ TRACKED_SPORTS = [
 
     "americanfootball_nfl",
 
+    "americanfootball_ncaaf",
+
     "basketball_nba",
+
+    "basketball_wnba",
 
     "baseball_mlb",
 
@@ -56,6 +60,10 @@ TRACKED_SPORTS = [
     "mma_mixed_martial_arts",
 
     "tennis_atp_french_open",
+
+    "aussierules_afl",
+
+    "rugbyleague_nrl",
 
 ]
 
@@ -108,3 +116,4 @@ ML_API_PORT = int(os.getenv("ML_API_PORT", "8000"))
 
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
