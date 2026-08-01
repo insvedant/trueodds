@@ -662,7 +662,13 @@ function calcEV(games, minEV = 0) {
             }
         }
     }
-    return evBets.sort((a, b) => b.ev - a.ev);
+    // Cap output — with 11+ sports now tracked, an uncapped scan can return
+    // 10,000+ "positive EV" results at minEV=0, which is both meaningless
+    // to a user (nobody reviews 11,000 bets) and expensive to construct,
+    // serialize, and transmit. Sorted descending already, so this keeps
+    // the strongest opportunities.
+    const MAX_EV_RESULTS = 200;
+    return evBets.sort((a, b) => b.ev - a.ev).slice(0, MAX_EV_RESULTS);
 }
 function calcMiddles(games, minGapPoints = 1) {
     const middles = [];
