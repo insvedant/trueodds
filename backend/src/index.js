@@ -1,197 +1,179 @@
-require('dotenv').config()
-const express   = require('express')
-const cors      = require('cors')
-const mongoose  = require('mongoose')
-const http      = require('http')
-const { Server }= require('socket.io')
-const rateLimit = require('express-rate-limit')
-
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const mongoose = require('mongoose');
+const http = require('http');
+const { Server } = require('socket.io');
+const rateLimit = require('express-rate-limit');
+// Without these, an uncaught exception anywhere in the app kills the whole
+// process immediately mid-request with no clean response — the connection
+// just drops, which browsers commonly misreport as a CORS error since no
+// headers ever arrive. This won't stop that from happening, but it means
+// the next time it does, we get a full stack trace in the logs instead of
+// the process silently vanishing and pm2 quietly restarting it.
+process.on('uncaughtException', (err) => {
+    console.error('[FATAL] Uncaught exception — process will exit:', err.message, err.stack);
+    process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[FATAL] Unhandled promise rejection:', reason instanceof Error ? reason.stack : reason);
+});
 function getAllowedOrigins() {
-  const base = [
-    'http://localhost:3000',
-    'http://localhost:4000',
-  ]
-  const fe = process.env.FRONTEND_URL
-  if (fe) {
-    base.push(fe)
-    if (fe.includes('://www.')) base.push(fe.replace('://www.', '://'))
-    else base.push(fe.replace('://', '://www.'))
-  }
-  base.push('https://trueodds.ca', 'https://www.trueodds.ca')
-  base.push('https://trueodds.us', 'https://www.trueodds.us')
-  return base
+    const base = [
+        'http://localhost:3000',
+        'http://localhost:4000',
+    ];
+    const fe = process.env.FRONTEND_URL;
+    if (fe) {
+        base.push(fe);
+        if (fe.includes('://www.'))
+            base.push(fe.replace('://www.', '://'));
+        else
+            base.push(fe.replace('://', '://www.'));
+    }
+    base.push('https://trueodds.ca', 'https://www.trueodds.ca');
+    base.push('https://trueodds.us', 'https://www.trueodds.us');
+    return base;
 }
-
-const app    = express()
-app.set('trust proxy', 1)
-const server = http.createServer(app)
-const io     = new Server(server, {
-  cors: { origin: getAllowedOrigins(), methods: ['GET','POST'], credentials: true }
-})
-
-app.use('/api/webhook/stripe',
-  express.raw({ type: 'application/json' }),
-  require('./routes/webhook')
-)
-
-app.use(cors({ origin: getAllowedOrigins(), credentials: true }))
-app.use(express.json({ limit: '10kb' }))
-app.use(express.urlencoded({ extended: true }))
-
-app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500, message: { success: false, message: 'Too many requests.' } }))
-app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: { success: false, message: 'Too many login attempts. Please wait 15 minutes.' } }))
-app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }))
-
+const app = express();
+app.set('trust proxy', 1);
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: { origin: getAllowedOrigins(), methods: ['GET', 'POST'], credentials: true }
+});
+app.use('/api/webhook/stripe', express.raw({ type: 'application/json' }), require('./routes/webhook'));
+app.use(cors({ origin: getAllowedOrigins(), credentials: true }));
+app.use(express.json({ limit: '10kb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500, message: { success: false, message: 'Too many requests.' } }));
+app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: { success: false, message: 'Too many login attempts. Please wait 15 minutes.' } }));
+app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
 function priceStatus(envVal) {
-  if (!envVal) return 'missing'
-  if (envVal.startsWith('price_')) return 'set'
-  // looks like something is in the var, but it's not a valid Stripe Price ID
-  return 'invalid'
+    if (!envVal)
+        return 'missing';
+    if (envVal.startsWith('price_'))
+        return 'set';
+    return 'invalid';
 }
-
 app.get('/health', (req, res) => res.json({
-  status:   'ok',
-  env:      process.env.NODE_ENV || 'development',
-  db:       mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-  stripe:   process.env.STRIPE_SECRET_KEY?.startsWith('sk_') ? 'configured' : 'missing',
-  stripeWebhook: process.env.STRIPE_WEBHOOK_SECRET?.startsWith('whsec_') ? 'configured' : 'missing',
-  zoho:     (process.env.ZOHO_USER && process.env.ZOHO_PASSWORD) ? 'configured' : 'missing',
-  telegram: (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) ? 'configured' : 'missing',
-  stripeBasicMonthly:    priceStatus(process.env.STRIPE_PRICE_BASIC_MONTHLY),
-  stripeBasicYearly:     priceStatus(process.env.STRIPE_PRICE_BASIC_YEARLY),
-  stripeGoldMonthly:     priceStatus(process.env.STRIPE_PRICE_GOLD_MONTHLY),
-  stripeGoldYearly:      priceStatus(process.env.STRIPE_PRICE_GOLD_YEARLY),
-  stripePlatinumMonthly: priceStatus(process.env.STRIPE_PRICE_PLATINUM_MONTHLY),
-  stripePlatinumYearly:  priceStatus(process.env.STRIPE_PRICE_PLATINUM_YEARLY),
-}))
-
-app.get('/api/health', (req, res) => res.redirect('/health'))
-
-app.use('/api/auth',          require('./routes/auth'))
-app.use('/api/subscriptions', require('./routes/subscriptions'))
-app.use('/api/hedge',         require('./routes/hedge'))
-app.use('/api/promo-converter', require('./routes/promoConverter'))
-app.use('/api/tools',         require('./routes/tools'))
-app.use('/api/referral',      require('./routes/referral'))
-app.use('/api/chat',          require('./routes/chat'))
-app.use('/api/telegram',      require('./routes/telegram'))
-app.use('/api/settings',      require('./routes/settings'))
-app.use('/api/affiliates',    require('./routes/affiliates'))
-app.use('/api/blog',          require('./routes/blog'))
-app.use('/api/newsletter',    require('./routes/newsletter'))
-app.use('/api/discord',       require('./routes/discord'))
-app.use('/api/cron',          require('./routes/discordAlerts'))
-app.use('/api/admin/logs',    require('./routes/admin/logs'))
-app.use('/api/promotion',     require('./routes/promotion'))
-app.use('/api',               require('./routes/odds'))
-app.use('/api/bets',          require('./routes/bets'))
-app.use('/api/alerts',        require('./routes/alerts'))
-app.use('/api/admin',         require('./routes/admin'))
-app.use('/api/analytics',     require('./routes/analytics'))
-app.use('/api/ml',            require('./routes/ml'))
-
-app.use((req, res) =>
-  res.status(404).json({ success: false, message: `Route ${req.method} ${req.path} not found.` })
-)
+    status: 'ok',
+    env: process.env.NODE_ENV || 'development',
+    db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    stripe: process.env.STRIPE_SECRET_KEY?.startsWith('sk_') ? 'configured' : 'missing',
+    stripeWebhook: process.env.STRIPE_WEBHOOK_SECRET?.startsWith('whsec_') ? 'configured' : 'missing',
+    zoho: (process.env.ZOHO_USER && process.env.ZOHO_PASSWORD) ? 'configured' : 'missing',
+    telegram: (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) ? 'configured' : 'missing',
+    stripeBasicMonthly: priceStatus(process.env.STRIPE_PRICE_BASIC_MONTHLY),
+    stripeBasicYearly: priceStatus(process.env.STRIPE_PRICE_BASIC_YEARLY),
+    stripeGoldMonthly: priceStatus(process.env.STRIPE_PRICE_GOLD_MONTHLY),
+    stripeGoldYearly: priceStatus(process.env.STRIPE_PRICE_GOLD_YEARLY),
+    stripePlatinumMonthly: priceStatus(process.env.STRIPE_PRICE_PLATINUM_MONTHLY),
+    stripePlatinumYearly: priceStatus(process.env.STRIPE_PRICE_PLATINUM_YEARLY),
+}));
+app.get('/api/health', (req, res) => res.redirect('/health'));
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/subscriptions', require('./routes/subscriptions'));
+app.use('/api/hedge', require('./routes/hedge'));
+app.use('/api/promo-converter', require('./routes/promoConverter'));
+app.use('/api/tools', require('./routes/tools'));
+app.use('/api/referral', require('./routes/referral'));
+app.use('/api/chat', require('./routes/chat'));
+app.use('/api/telegram', require('./routes/telegram'));
+app.use('/api/settings', require('./routes/settings'));
+app.use('/api/affiliates', require('./routes/affiliates'));
+app.use('/api/blog', require('./routes/blog'));
+app.use('/api/newsletter', require('./routes/newsletter'));
+app.use('/api/discord', require('./routes/discord'));
+app.use('/api/cron', require('./routes/discordAlerts'));
+app.use('/api/admin/logs', require('./routes/admin/logs'));
+app.use('/api/promotion', require('./routes/promotion'));
+app.use('/api', require('./routes/odds'));
+app.use('/api/bets', require('./routes/bets'));
+app.use('/api/alerts', require('./routes/alerts'));
+app.use('/api/admin', require('./routes/admin'));
+app.use('/api/analytics', require('./routes/analytics'));
+app.use('/api/ml', require('./routes/ml'));
+app.use((req, res) => res.status(404).json({ success: false, message: `Route ${req.method} ${req.path} not found.` }));
 app.use((err, req, res, next) => {
-  console.error(err)
-  res.status(500).json({ success: false, message: 'Internal server error.' })
-})
-
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Internal server error.' });
+});
 io.on('connection', socket => {
-  const interval = setInterval(() => {
-    socket.emit('odds_update', { timestamp: new Date() })
-  }, 10000)
-  socket.on('disconnect', () => clearInterval(interval))
-})
-
-const chatIo = io.of('/chat')
-require('./services/chatSocket')(chatIo)
-
-const PORT = process.env.PORT || 4000
-
+    const interval = setInterval(() => {
+        socket.emit('odds_update', { timestamp: new Date() });
+    }, 10000);
+    socket.on('disconnect', () => clearInterval(interval));
+});
+const chatIo = io.of('/chat');
+require('./services/chatSocket')(chatIo);
+const PORT = process.env.PORT || 4000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 TrueOdds backend running on port ${PORT}`)
-  const hasStripe = process.env.STRIPE_SECRET_KEY?.startsWith('sk_')
-  console.log(`💳 Stripe: ${hasStripe ? '✅ Configured' : '⚠️  Add STRIPE_SECRET_KEY'}`)
-
-  const { registerWebhook } = require('./services/telegramService')
-  registerWebhook().catch(() => {})
-})
-
+    console.log(`🚀 TrueOdds backend running on port ${PORT}`);
+    const hasStripe = process.env.STRIPE_SECRET_KEY?.startsWith('sk_');
+    console.log(`💳 Stripe: ${hasStripe ? '✅ Configured' : '⚠️  Add STRIPE_SECRET_KEY'}`);
+    const { registerWebhook } = require('./services/telegramService');
+    registerWebhook().catch(() => { });
+});
 mongoose.connect(process.env.MONGODB_URI)
-  .then(async () => {
-    console.log('✅ MongoDB connected')
-
-    // ── Admin account upsert ──────────────────────────────────────────────────
+    .then(async () => {
+    console.log('✅ MongoDB connected');
     try {
-      const User = require('./models/User')
-      const adminEmail    = process.env.ADMIN_EMAIL    || 'admin@trueodds.com'
-      const adminPassword = process.env.ADMIN_PASSWORD || 'true11d'
-      let admin = await User.findOne({ email: adminEmail })
-      if (!admin) {
-        await User.create({
-          name: 'Admin User',
-          email: adminEmail,
-          password: adminPassword,
-          role: 'admin',
-          plan: 'platinum',
-          subscriptionStatus: 'active',
-          trialEndsAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-        })
-        console.log('✅ Admin account created:', adminEmail)
-      } else {
-        const bcrypt = require('bcryptjs')
-        const hashed = await bcrypt.hash(adminPassword, 12)
-        await User.findByIdAndUpdate(admin._id, {
-          role: 'admin',
-          plan: 'platinum',
-          subscriptionStatus: 'active',
-          password: hashed,
-        })
-        console.log('✅ Admin account synced:', adminEmail)
-      }
-    } catch (e) {
-      console.warn('⚠️  Admin upsert failed:', e.message)
+        const User = require('./models/User');
+        const adminEmail = process.env.ADMIN_EMAIL || 'admin@trueodds.com';
+        const adminPassword = process.env.ADMIN_PASSWORD || 'true11d';
+        let admin = await User.findOne({ email: adminEmail });
+        if (!admin) {
+            await User.create({
+                name: 'Admin User',
+                email: adminEmail,
+                password: adminPassword,
+                role: 'admin',
+                plan: 'platinum',
+                subscriptionStatus: 'active',
+                trialEndsAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+            });
+            console.log('✅ Admin account created:', adminEmail);
+        }
+        else {
+            const bcrypt = require('bcryptjs');
+            const hashed = await bcrypt.hash(adminPassword, 12);
+            await User.findByIdAndUpdate(admin._id, {
+                role: 'admin',
+                plan: 'platinum',
+                subscriptionStatus: 'active',
+                password: hashed,
+            });
+            console.log('✅ Admin account synced:', adminEmail);
+        }
     }
-
-    // ── Cache Warmer ──────────────────────────────────────────────────────────
-    // Pre-warms arb + EV + odds on startup, then re-warms every 4.5 min
-    // (slightly under the 5-min TTL) so users always hit a warm cache.
-    const { getAllOdds, getArbitrage, getPositiveEV } = require('./services/apiService')
-
+    catch (e) {
+        console.warn('⚠️  Admin upsert failed:', e.message);
+    }
+    const { getAllOdds, getArbitrage, getPositiveEV } = require('./services/apiService');
     async function warmCache() {
-      try {
-        console.log('[CacheWarmer] Warming dashboard cache...')
-        // getAllOdds first — arb & EV both depend on it and will hit L1 once it's warm
-        await getAllOdds()
-        await Promise.allSettled([
-          getArbitrage(0, null),
-          getPositiveEV(0, null),
-        ])
-        console.log('[CacheWarmer] ✅ Done.')
-      } catch (e) {
-        console.warn('[CacheWarmer] ⚠️  Error:', e.message)
-      }
+        try {
+            console.log('[CacheWarmer] Warming dashboard cache...');
+            await getAllOdds();
+            await Promise.allSettled([
+                getArbitrage(0, null),
+                getPositiveEV(0, null),
+            ]);
+            console.log('[CacheWarmer] ✅ Done.');
+        }
+        catch (e) {
+            console.warn('[CacheWarmer] ⚠️  Error:', e.message);
+        }
     }
-
-    // Warm immediately after DB connects, then on a rolling interval
-    warmCache()
-    setInterval(warmCache, 4.5 * 60 * 1000)
-
-    // ── Oracle VM Keepalive ───────────────────────────────────────────────────
-    // Oracle Free Tier throttles idle VMs. Pinging /health every 4 min keeps
-    // the Node process and the ML FastAPI process alive and avoids cold starts.
-    const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`
-    const ML_API_URL  = process.env.ML_API_URL  || 'http://localhost:8000'
-
+    warmCache();
+    setInterval(warmCache, 4.5 * 60 * 1000);
+    const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+    const ML_API_URL = process.env.ML_API_URL || 'http://localhost:8000';
     setInterval(() => {
-      fetch(`${BACKEND_URL}/health`).catch(() => {})
-      fetch(`${ML_API_URL}/health`).catch(() => {})
-    }, 4 * 60 * 1000)
-
-    console.log('[Keepalive] ✅ Self-ping scheduled every 4 min.')
-  })
-  .catch(err => {
-    console.error('❌ MongoDB error:', err.message)
-  })
+        fetch(`${BACKEND_URL}/health`).catch(() => { });
+        fetch(`${ML_API_URL}/health`).catch(() => { });
+    }, 4 * 60 * 1000);
+    console.log('[Keepalive] ✅ Self-ping scheduled every 4 min.');
+})
+    .catch(err => {
+    console.error('❌ MongoDB error:', err.message);
+});
