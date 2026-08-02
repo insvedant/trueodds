@@ -1,36 +1,27 @@
+import re
+
 path = "ml/models/train.py"
-old = '''ROLLING_DAYS    = 30
-MAX_SAMPLES     = 50_000
-RANDOM_STATE    = 42
-CI_MODE             = os.environ.get('CI_TRAINING', '').lower() == 'true'
-N_ESTIMATORS_LARGE  = 50  if CI_MODE else 150
-N_ESTIMATORS_MEDIUM = 30  if CI_MODE else 100
-N_JOBS              = -1
-logger.info(f"Training mode : {'CI-FAST' if CI_MODE else 'FULL'}")
-logger.info(f"Rolling window: last {ROLLING_DAYS} days")
-logger.info(f"Max samples   : {MAX_SAMPLES:,}")
-logger.info(f"n_jobs        : {N_JOBS} (all cores)")'''
-new = '''ROLLING_DAYS    = 30
-MAX_SAMPLES     = 35_000
-RANDOM_STATE    = 42
-CI_MODE             = os.environ.get('CI_TRAINING', '').lower() == 'true'
-N_ESTIMATORS_LARGE  = 50  if CI_MODE else 150
-N_ESTIMATORS_MEDIUM = 30  if CI_MODE else 100
-# Was -1 (all cores) -- on a 954MB RAM VM, each parallel sklearn worker
-# process carries its own memory overhead, and that parallelism is the
-# most likely driver of the OOM kill (process requested 3.8GB virtual
-# memory). Single-threaded is slower but has a flat, predictable memory
-# footprint instead of multiplying by core count.
-N_JOBS              = 1
-logger.info(f"Training mode : {'CI-FAST' if CI_MODE else 'FULL'}")
-logger.info(f"Rolling window: last {ROLLING_DAYS} days")
-logger.info(f"Max samples   : {MAX_SAMPLES:,}")
-logger.info(f"n_jobs        : {N_JOBS} (single-threaded -- reduced for memory safety)")'''
 content = open(path).read()
-count = content.count(old)
-if count != 1:
-    print(f"SAFETY CHECK FAILED -- found {count} matches (expected exactly 1). Not touching the file.")
+lines = content.split('\n')
+
+changed = []
+
+for i, line in enumerate(lines):
+    stripped = line.strip()
+    if re.match(r'^MAX_SAMPLES\s*=\s*50_000\s*$', stripped):
+        lines[i] = line.replace('50_000', '35_000')
+        changed.append(('MAX_SAMPLES', i + 1))
+    elif re.match(r'^N_JOBS\s*=\s*-1\s*$', stripped):
+        indent = line[:len(line) - len(line.lstrip())]
+        lines[i] = f'{indent}N_JOBS              = 1  # was -1 (all cores) -- reduced for memory safety on this VM'
+        changed.append(('N_JOBS', i + 1))
+    elif '(all cores)' in line and 'n_jobs' in line.lower():
+        lines[i] = line.replace('(all cores)', '(single-threaded -- reduced for memory safety)')
+        changed.append(('log line', i + 1))
+
+if len(changed) < 2:
+    print(f"SAFETY CHECK FAILED -- only matched {len(changed)} of the expected patterns: {changed}")
+    print("Not writing any changes.")
 else:
-    content = content.replace(old, new)
-    open(path, "w").write(content)
-    print("Patched successfully.")
+    open(path, 'w').write('\n'.join(lines))
+    print(f"Patched successfully. Changed: {changed}")
