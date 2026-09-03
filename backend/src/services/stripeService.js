@@ -74,7 +74,7 @@ async function cancelSubscription(stripeSubscriptionId) {
 async function createSetupIntent(stripeCustomerId) {
     return stripe.setupIntents.create({
         customer: stripeCustomerId,
-        payment_method_types: ['card', 'paypal'],
+        payment_method_types: ['card'],
     });
 }
 async function createOneOffCharge({ stripeCustomerId, amount, description }) {
