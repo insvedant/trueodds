@@ -57,8 +57,6 @@ export default function RootLayout({
                         gtag('config', 'G-YNFT85DCXK');
                     `}
                 </Script>
-
-          
             </body>
         </html>
     );
