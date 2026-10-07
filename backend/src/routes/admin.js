@@ -3,6 +3,7 @@ const { protect, adminOnly } = require('../middleware/auth');
 const User = require('../models/User');
 const Bet = require('../models/Bet');
 const ActivityLog = require('../models/ActivityLog');
+const { syncStripeToMongo } = require('../services/stripeSync');
 router.use(protect, adminOnly);
 router.get('/overview', async (req, res) => {
     try {
@@ -15,17 +16,48 @@ router.get('/overview', async (req, res) => {
         ]);
         const now = new Date(), startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const newThisMonth = users.filter(u => u.createdAt >= startOfMonth).length;
-        const totalRevenue = users.reduce((s, u) => s + (u.totalPaid || 0), 0);
-        const monthlyPayments = users.flatMap(u => u.payments.filter(p => new Date(p.date) >= startOfMonth));
+        // Revenue is derived from the recorded successful payment ledger.
+        // totalPaid is kept for user-level display, but summing the payment
+        // records prevents stale aggregate values from hiding real payments.
+        const allPayments = users.flatMap(u => (u.payments || []).map(p => ({
+            ...p.toObject(),
+            userName: u.name,
+            userEmail: u.email,
+            userPlan: u.plan,
+        })));
+        const totalRevenue = allPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+        const monthlyPayments = allPayments.filter(p => p.date && new Date(p.date) >= startOfMonth);
         const monthlyRevenue = monthlyPayments.reduce((s, p) => s + (p.amount || 0), 0);
         const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
         const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 1);
-        const lastMonthPayments = users.flatMap(u => u.payments.filter(p => new Date(p.date) >= lastMonthStart && new Date(p.date) < lastMonthEnd));
+        const lastMonthPayments = users.flatMap(u => (u.payments || []).filter(p => new Date(p.date) >= lastMonthStart && new Date(p.date) < lastMonthEnd));
         const lastMonthRevenue = lastMonthPayments.reduce((s, p) => s + (p.amount || 0), 0);
         const planCounts = users.reduce((acc, u) => { acc[u.plan] = (acc[u.plan] || 0) + 1; return acc; }, {});
+        const latestPayment = allPayments
+            .filter(p => p.date)
+            .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0] || null;
         const totalStaked = bets.reduce((s, b) => s + b.stake, 0);
         const totalProfit = bets.reduce((s, b) => s + b.profit, 0);
-        res.json({ success: true, stats: { totalUsers, activeUsers, newThisMonth, totalRevenue, monthlyRevenue, lastMonthRevenue, planCounts, totalBets, totalStaked, totalProfit } });
+        res.json({ success: true, stats: {
+            totalUsers,
+            activeUsers,
+            newThisMonth,
+            totalRevenue,
+            monthlyRevenue,
+            lastMonthRevenue,
+            planCounts,
+            totalBets,
+            totalStaked,
+            totalProfit,
+            latestPlan: latestPayment?.plan || latestPayment?.userPlan || null,
+            latestPayment: latestPayment ? {
+                amount: latestPayment.amount,
+                plan: latestPayment.plan || latestPayment.userPlan,
+                userName: latestPayment.userName,
+                userEmail: latestPayment.userEmail,
+                date: latestPayment.date,
+            } : null,
+        } });
     }
     catch (e) {
         res.status(500).json({ success: false, message: e.message });
@@ -97,7 +129,7 @@ router.get('/revenue', async (req, res) => {
     try {
         const users = await User.find();
         const totalRevenue = users.reduce((s, u) => s + (u.totalPaid || 0), 0);
-        const byPlan = { gold: 0, platinum: 0 };
+        const byPlan = { basic: 0, gold: 0, platinum: 0 };
         users.forEach(u => u.payments.forEach(p => { if (byPlan[p.plan] !== undefined)
             byPlan[p.plan] += p.amount || 0; }));
         const recentPayments = users.flatMap(u => u.payments.map(p => ({ ...p.toObject(), userName: u.name, userEmail: u.email }))).sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 50);
@@ -147,12 +179,19 @@ router.get('/payments', async (req, res) => {
         payments.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         const monthlyMap = {};
         for (const p of payments) {
-            const m = new Date(p.date).toLocaleString('en-US', { month: 'short', year: '2-digit' });
-            monthlyMap[m] = (monthlyMap[m] || 0) + (p.amount || 0);
+            if (!p.date) continue;
+            const d = new Date(p.date);
+            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            monthlyMap[key] = (monthlyMap[key] || 0) + (p.amount || 0);
         }
         const monthly = Object.entries(monthlyMap)
-            .map(([month, revenue]) => ({ month, revenue }))
-            .slice(-12);
+            .sort(([a], [b]) => a.localeCompare(b))
+            .slice(-12)
+            .map(([key, revenue]) => {
+                const [year, month] = key.split('-').map(Number);
+                const label = new Date(year, month - 1, 1).toLocaleString('en-US', { month: 'short', year: '2-digit' });
+                return { month: label, revenue: Math.round(revenue * 100) / 100 };
+            });
         res.json({ success: true, payments, monthly });
     }
     catch (e) {
@@ -165,17 +204,44 @@ router.get('/revenue/monthly', async (req, res) => {
         const monthlyMap = {};
         for (const user of users) {
             for (const p of user.payments || []) {
-                const m = new Date(p.date).toLocaleString('en-US', { month: 'short', year: '2-digit' });
-                monthlyMap[m] = (monthlyMap[m] || 0) + (p.amount || 0);
+                if (!p.date) continue;
+                const d = new Date(p.date);
+                const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                monthlyMap[key] = (monthlyMap[key] || 0) + (p.amount || 0);
             }
         }
         const monthly = Object.entries(monthlyMap)
-            .map(([month, revenue]) => ({ month, revenue: Math.round(revenue * 100) / 100 }))
-            .slice(-12);
+            .sort(([a], [b]) => a.localeCompare(b))
+            .slice(-12)
+            .map(([key, revenue]) => {
+                const [year, month] = key.split('-').map(Number);
+                const label = new Date(year, month - 1, 1).toLocaleString('en-US', { month: 'short', year: '2-digit' });
+                return { month: label, revenue: Math.round(revenue * 100) / 100 };
+            });
         res.json({ success: true, monthly });
     }
     catch (e) {
         res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// POST /api/admin/stripe-sync — reconcile Stripe's paid invoices and
+// subscriptions into MongoDB. Safe to run repeatedly because invoice IDs
+// are used as the payment idempotency key.
+router.post('/stripe-sync', async (req, res) => {
+    try {
+        const result = await syncStripeToMongo();
+        res.json({
+            success: true,
+            message: 'Stripe data synchronized successfully.',
+            result,
+        });
+    } catch (e) {
+        console.error('[Stripe Sync] failed:', e);
+        res.status(500).json({
+            success: false,
+            message: e.message,
+        });
     }
 });
 
