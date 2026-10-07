@@ -12,7 +12,7 @@ function getInvoicePeriodEnd(invoice) {
     return lineEnd ? new Date(lineEnd * 1000) : null;
 }
 
-router.post('/stripe', require('express').raw({ type: 'application/json' }), async (req, res) => {
+router.post('/', async (req, res) => {
     const sig = req.headers['stripe-signature'];
 
     let event;
