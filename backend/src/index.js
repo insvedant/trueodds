@@ -41,6 +41,8 @@ const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: getAllowedOrigins(), methods: ['GET', 'POST'], credentials: true }
 });
+// Stripe webhook endpoint: POST /api/webhook/stripe
+// The webhook router handles '/' because this mount already includes /stripe.
 app.use('/api/webhook/stripe', express.raw({ type: 'application/json' }), require('./routes/webhook'));
 app.use(cors({ origin: getAllowedOrigins(), credentials: true }));
 app.use(express.json({ limit: '10kb' }));
