@@ -21,7 +21,7 @@ export const viewport: Viewport = {
     ],
 };
 
-const META_PIXEL_ID = 'YOUR_PIXEL_ID';
+const META_PIXEL_ID = 'YOUR_ACTUAL_PIXEL_ID';
 
 export default function RootLayout({
     children,
