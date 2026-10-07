@@ -77,7 +77,7 @@ export default function RootLayout({
                         (window, document,'script',
                         'https://connect.facebook.net/en_US/fbevents.js');
 
-                        fbq('init', '${META_PIXEL_ID}');
+                        fbq('init', '${1072228152246140&ev=PageView&noscript=1}');
                         fbq('track', 'PageView');
                     `}
                 />
@@ -87,7 +87,7 @@ export default function RootLayout({
                         height="1"
                         width="1"
                         style={{ display: 'none' }}
-                        src={`https://www.facebook.com/tr?id=${META_PIXEL_ID}&ev=PageView&noscript=1`}
+                        src={`https://www.facebook.com/tr?id=${1072228152246140&ev=PageView&noscript=1}&ev=PageView&noscript=1`}
                         alt=""
                     />
                 </noscript>
