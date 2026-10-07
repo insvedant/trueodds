@@ -4,8 +4,8 @@ import { AuthProvider } from '@/lib/auth'
 import { ThemeProvider } from '@/lib/theme'
 
 export const metadata: Metadata = {
-  title: 'TrueOdds — Smart Sports Betting Tools',
-  description: 'Real-time arbitrage, +EV betting tools, and odds comparison across 100+ sportsbooks.',
+  title: 'TrueOdds — Smart Sports Analytics Tools',
+  description: 'Real-time arbitrage, +EV Analytics tools, and odds comparison across 100+ sportsbooks.',
 }
 
 export const viewport: Viewport = {
