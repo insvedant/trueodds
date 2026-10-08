@@ -359,23 +359,9 @@ async def main():
 
     )
 
-    scheduler.add_job(
-
-        job_archive_snapshots,
-
-        trigger=CronTrigger(hour=0, minute=30),
-
-        id="archive_snapshots",
-
-        max_instances=1,
-
-        coalesce=True,
-
-        misfire_grace_time=NIGHTLY_MISFIRE_GRACE_SECONDS,
-
-    )
-
-
+    # Archival is NOT scheduled here: on the server it was removed from the scheduler and is run
+    # separately (python -m ml.archive_snapshots archives snapshots AND line movements). Re-adding a
+    # job here as well would run two archivers at once.
 
     scheduler.start()
 
