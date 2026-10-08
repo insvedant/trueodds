@@ -49,7 +49,7 @@ def test_reads_real_snapshots_cleans_ghost_teams_and_skips_markers(roots):
         row("e1", "2026-09-22T11:00:00", dup=True),
         row("e2", "2026-09-22T12:00:00", {"Ghost": {"pinnacle": -300}, "C": {"fanduel": None}}),
     ])
-    put(new, "year=2026/month=09/day=22/batch_0000.parquet", t)
+    put(new, "odds_snapshots/year=2026/month=09/day=22/batch_0000.parquet", t)
     rows, stats = collect()
     assert [(r["event_id"], sorted(r["h2h"])) for r in rows] == [("e1", ["A", "B"]), ("e2", ["Ghost"])]
     assert rows[0]["fetched_at"] == datetime(2026, 9, 22, 10, tzinfo=timezone.utc)
@@ -59,10 +59,10 @@ def test_reads_real_snapshots_cleans_ghost_teams_and_skips_markers(roots):
 def test_whole_files_before_the_window_are_skipped_without_being_opened(roots):
     new, _ = roots
     good = pa.Table.from_pylist([row("e1", "2026-09-22T10:00:00", {"A": {"pinnacle": -110}})])
-    put(new, "year=2026/month=09/day=22/batch_0000.parquet", good)
-    put(new, "year=2026/month=07/day=02/batch_0000.parquet", good)
-    put(new, "year=2026/month=09/day=19/batch_0000.parquet", good)          # one day of slack before the cutoff: still opened
-    corrupt = os.path.join(new, "year=2026/month=06/day=01/batch_0000.parquet")
+    put(new, "odds_snapshots/year=2026/month=09/day=22/batch_0000.parquet", good)
+    put(new, "odds_snapshots/year=2026/month=07/day=02/batch_0000.parquet", good)
+    put(new, "odds_snapshots/year=2026/month=09/day=19/batch_0000.parquet", good)          # one day of slack before the cutoff: still opened
+    corrupt = os.path.join(new, "odds_snapshots/year=2026/month=06/day=01/batch_0000.parquet")
     os.makedirs(os.path.dirname(corrupt)); open(corrupt, "wb").write(b"not a parquet file")
     rows, stats = collect()
     assert stats["files_pruned"] == 2 and stats["files_read"] == 2 and stats["files_unreadable"] == 0   # corrupt file never touched
@@ -72,7 +72,7 @@ def test_whole_files_before_the_window_are_skipped_without_being_opened(roots):
 def test_rows_before_the_cutoff_inside_an_opened_file_are_filtered(roots):
     new, _ = roots
     t = pa.Table.from_pylist([row("e1", "2026-09-19T23:00:00", {"A": {"pinnacle": -110}}), row("e1", "2026-09-20T01:00:00", {"A": {"pinnacle": -120}})])
-    put(new, "year=2026/month=09/day=19/batch_0000.parquet", t)
+    put(new, "odds_snapshots/year=2026/month=09/day=19/batch_0000.parquet", t)
     rows, _ = collect()
     assert [r["fetched_at"].hour for r in rows] == [1]
 
@@ -81,7 +81,7 @@ def test_files_without_odds_are_counted_and_the_lost_snapshots_are_reported(root
     new, _ = roots
     # what the old archiver bug produced: 3 REAL snapshots + 1 marker, none with odds
     t = pa.Table.from_pylist([{"event_id": "e1", "fetched_at": "2026-09-22T0%d:00:00" % i, "is_duplicate": i == 0} for i in range(4)])
-    put(new, "year=2026/month=09/day=22/batch_0000.parquet", t)
+    put(new, "odds_snapshots/year=2026/month=09/day=22/batch_0000.parquet", t)
     rows, stats = collect()
     assert rows == [] and stats["files_no_odds"] == 1 and stats["rows_odds_lost"] == 3
 
@@ -98,8 +98,8 @@ def test_legacy_layout_timestamp_typed_and_unpartitioned_is_read(roots):
 
 def test_one_corrupt_file_does_not_stop_the_stream(roots):
     new, _ = roots
-    bad = os.path.join(new, "year=2026/month=09/day=21/batch_0000.parquet")
+    bad = os.path.join(new, "odds_snapshots/year=2026/month=09/day=21/batch_0000.parquet")
     os.makedirs(os.path.dirname(bad)); open(bad, "wb").write(b"garbage")
-    put(new, "year=2026/month=09/day=22/batch_0000.parquet", pa.Table.from_pylist([row("e1", "2026-09-22T10:00:00", {"A": {"pinnacle": -110}})]))
+    put(new, "odds_snapshots/year=2026/month=09/day=22/batch_0000.parquet", pa.Table.from_pylist([row("e1", "2026-09-22T10:00:00", {"A": {"pinnacle": -110}})]))
     rows, stats = collect()
     assert len(rows) == 1 and stats["files_unreadable"] == 1
