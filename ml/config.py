@@ -39,6 +39,7 @@ COL_STATS           = "ml_stats"
 # Matches the directory layout that already exists on the VM.
 ARCHIVE_DIR = "/home/ubuntu/data_archive"
 ARCHIVE_SUBDIR_ODDS_SNAPSHOTS = "odds_snapshots"
+ARCHIVE_SUBDIR_LINE_MOVEMENTS = "line_movements"
 LIVE_RETENTION_DAYS = 7
 DAILY_ARCHIVE_COMPRESSION = "snappy"
 # Older, pre-existing Parquet backup from before the current archive
@@ -98,7 +99,7 @@ SHARP_BOOKS = ["pinnacle", "circa", "bookmaker"]
 
 
 
-COLLECTION_INTERVAL_SECONDS = 60      
+COLLECTION_INTERVAL_SECONDS = 300      
 
 HISTORICAL_LOOKBACK_DAYS    = 90      
 
