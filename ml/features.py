@@ -172,7 +172,113 @@ def build_cross_book_features(book_odds: dict) -> dict:
     features["vig_estimate"]          = max(0, sum(all_best_probs) - 1.0) if all_best_probs else 0.0
     features["arb_present"]           = int(sum(all_best_probs) < 1.0) if all_best_probs else 0
 
+    # Same team-agnostic summaries the CLV model is trained on, so live
+    # prediction hands it columns it actually knows by name.
+    features.update(build_event_level_features(book_odds))
+
     return features
+
+def parse_utc(value):
+    """
+    Best-effort conversion of the many timestamp shapes that appear across the
+    system into a timezone-aware UTC datetime (or None):
+      * pymongo datetimes (naive, meaning UTC) and tz-aware datetimes
+      * pandas Timestamps / numpy datetime64 from parquet
+      * ISO strings, with or without 'Z' / offset, as written by the archiver
+    """
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        elif hasattr(value, "to_pydatetime"):          # pandas Timestamp
+            value = value.to_pydatetime()
+        elif isinstance(value, np.datetime64):
+            value = pd.Timestamp(value).to_pydatetime()
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def clean_h2h(raw) -> dict:
+    """
+    Drop empty selections and null/non-numeric prices from an h2h block.
+
+    Archived parquet rows come back from pyarrow as structs that carry a key
+    for EVERY team seen anywhere in that file (almost all of them None for any
+    one game). Stripping those immediately keeps each snapshot to a handful of
+    entries instead of a hundred, which is what makes streaming 100k+ rows
+    feasible on a small VM.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for selection, books in raw.items():
+        if not isinstance(books, dict):
+            continue
+        priced = {b: o for b, o in books.items()
+                  if isinstance(o, (int, float)) and not isinstance(o, bool) and not (isinstance(o, float) and np.isnan(o)) and abs(o) >= 100}
+        if priced:
+            out[selection] = priced
+    return out
+
+
+def build_event_level_features(book_odds: dict) -> dict:
+    """
+    Team-agnostic summary of an event's h2h market.
+
+    build_cross_book_features() names its columns after the TEAM
+    (e.g. new_york_yankees_best_odds_dec). Over a month of games that produced
+    ~3,000 mostly-empty columns for ~700 training rows, and a column that only
+    ever appears in one or two games cannot teach a model anything it can
+    apply to the next game. These summaries mean the same thing for every
+    event, so they are what the CLV model trains on (and they are also added
+    to build_cross_book_features so live prediction supplies the same names).
+    """
+    h2h = clean_h2h((book_odds or {}).get("h2h"))
+    spreads, stds, counts, divs, best_probs = [], [], [], [], []
+    pinnacle = 0
+    for selection, books in h2h.items():
+        decs = [american_to_decimal(o) for o in books.values()]
+        probs = [1 / d for d in decs]
+        sharp = [1 / american_to_decimal(books[b]) for b in books if b in SHARP_BOOKS]
+        soft = [1 / american_to_decimal(books[b]) for b in books if b not in SHARP_BOOKS]
+        sharp_avg = np.mean(sharp) if sharp else np.mean(probs)
+        soft_avg = np.mean(soft) if soft else np.mean(probs)
+        spreads.append(max(decs) - min(decs))
+        stds.append(float(np.std(probs)))
+        counts.append(len(books))
+        divs.append(float(sharp_avg - soft_avg))
+        best_probs.append(1 / max(decs))
+        pinnacle = max(pinnacle, int("pinnacle" in books))
+    if not spreads:
+        return {
+            "n_selections": 0, "avg_book_count": 0.0, "avg_odds_spread": 0.0, "max_odds_spread": 0.0,
+            "avg_prob_std": 0.0, "mean_abs_sharp_soft_div": 0.0, "max_abs_sharp_soft_div": 0.0,
+            "pinnacle_present": 0, "combined_implied_prob": 1.0, "vig_estimate": 0.0, "arb_present": 0,
+        }
+    total = float(sum(best_probs))
+    return {
+        "n_selections":            len(spreads),
+        "avg_book_count":          float(np.mean(counts)),
+        "avg_odds_spread":         float(np.mean(spreads)),
+        "max_odds_spread":         float(max(spreads)),
+        "avg_prob_std":            float(np.mean(stds)),
+        "mean_abs_sharp_soft_div": float(np.mean([abs(d) for d in divs])),
+        "max_abs_sharp_soft_div":  float(max(abs(d) for d in divs)),
+        "pinnacle_present":        pinnacle,
+        "combined_implied_prob":   total,
+        "vig_estimate":            max(0.0, total - 1.0),
+        "arb_present":             int(total < 1.0),
+    }
+
 
 def minutes_to_game(commence_time: str) -> float:
     """Calculate minutes until game starts."""
