@@ -92,6 +92,10 @@ userSchema.methods.toPublicJSON = function () {
         subscriptionStatus: this.subscriptionStatus,
         subscriptionExpiry: this.subscriptionExpiry,
         cancelAtPeriodEnd: this.cancelAtPeriodEnd,
+        // Lets the app show "Cancel subscription" only to people who actually have
+        // a Stripe subscription to cancel (not admin-granted plans). Boolean only —
+        // the subscription id itself is never sent to the browser.
+        billedViaStripe: !!this.stripeSubscriptionId,
         trialEndsAt: this.trialEndsAt,
         totalPaid: this.totalPaid,
         promoConverterUses: this.promoConverterUses,
