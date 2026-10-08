@@ -20,7 +20,8 @@ from ml.config import ARCHIVE_DIR, LEGACY_ARCHIVE_DIR
 
 def main() -> int:
     for label, root in (("new archive", ARCHIVE_DIR), ("legacy backup", LEGACY_ARCHIVE_DIR)):
-        files = sorted(glob.glob(os.path.join(root, "**", "*.parquet"), recursive=True))
+        scan_root = os.path.join(root, "odds_snapshots") if root == ARCHIVE_DIR else root
+        files = sorted(glob.glob(os.path.join(scan_root, "**", "*.parquet"), recursive=True))
         total_files = len(files)
         files_no_odds = rows_total = rows_lost = rows_with_odds = unreadable = 0
         worst_days = {}
