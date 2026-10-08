@@ -79,6 +79,29 @@ def no_vig_prob(odds_list: list) -> list:
         return raw_probs
     return [p / total for p in raw_probs]
 
+def resolve_to_real_snapshot(db, prev: dict | None) -> dict | None:
+    """
+    `prev` (the event's latest document) can be an "unchanged" marker: no book_odds, only a pointer
+    (`duplicate_of`) to the real snapshot it repeats. Everything downstream compares prices against
+    `prev["book_odds"]`, so a marker used to look like "no odds at all", which had two costly effects:
+      * the next cycle always looked CHANGED, so a full snapshot was stored again (quiet markets
+        alternated full / marker / full, doubling the storage the dedup was meant to save), and
+      * detect_line_movement() compared against nothing, so the first price move after any quiet
+        cycle was never recorded as a line movement.
+    Resolve the marker to the real snapshot it points to, keeping the marker's own fetched_at so
+    seconds_since_prev still measures the time since the last observation. The real snapshot's _id is
+    kept, so new markers point straight at the real one (never at another marker).
+    """
+    if not prev or not prev.get("is_duplicate"):
+        return prev
+    original = db[COL_ODDS_SNAPSHOTS].find_one({"_id": prev.get("duplicate_of")})
+    if original is None or original.get("is_duplicate"):
+        return prev          # original already archived: nothing to compare with, store a fresh full snapshot
+    resolved = dict(original)
+    resolved["fetched_at"] = prev["fetched_at"]
+    return resolved
+
+
 def book_odds_unchanged(prev: dict | None, book_odds: dict) -> bool:
     """
     Exact comparison of the previous snapshot's book_odds against the
@@ -416,6 +439,13 @@ async def collect_snapshot():
     db  = get_db()
     now = datetime.now(timezone.utc)
 
+    # Storage guard (ml/maintenance.py): when MongoDB is nearly full, stop writing odds so there is
+    # always room left for users, subscriptions and webhooks that live in the same cluster.
+    guard = db[COL_STATS].find_one({"_id": "storage_guard"}) or {}
+    if guard.get("paused"):
+        logger.error(f"Odds collection PAUSED by the storage guard ({guard.get('reason', 'MongoDB nearly full')}) — nothing written")
+        return {"games": 0, "changed": 0, "duplicates": 0, "movements": 0, "arbs": 0, "timestamp": now.isoformat(), "paused": True}
+
     logger.info(f"Starting odds collection at {now.isoformat()}")
 
     async with httpx.AsyncClient() as client:
@@ -444,6 +474,7 @@ async def collect_snapshot():
                     {"event_id": event_id},
                     sort=[("fetched_at", DESCENDING)]
                 )
+                prev = resolve_to_real_snapshot(db, prev)
                 unchanged = book_odds_unchanged(prev, book_odds)
 
                 if unchanged:
