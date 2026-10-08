@@ -392,6 +392,41 @@ def iter_h2h_snapshots(cutoff_after=None, stats: dict | None = None, batch_size:
             logger.warning(f"Skipping unreadable parquet file {path}: {first_line[:200]}")
 
 
+
+def iter_observations(cutoff_after=None, stats: dict | None = None, batch_size: int = 20000):
+    """
+    Yield (event_id, fetched_at, commence_time) for EVERY archived document, including the
+    "unchanged" markers, reading only those three narrow columns. Real snapshots only exist when a
+    price changed, so markers are the only record that an event was still being watched; the CLV
+    builder uses them to know the market was live at a given lead time.
+    """
+    import pyarrow.parquet as pq
+    from ml.features import parse_utc
+
+    stats = stats if stats is not None else {}
+    stats.setdefault("obs_rows", 0)
+    cutoff_day = cutoff_after.date() if cutoff_after is not None else None
+    cutoff_utc = parse_utc(cutoff_after) if cutoff_after is not None else None
+    for path in sorted(_all_files()):
+        pdate = _partition_date(path)
+        if cutoff_day is not None and pdate is not None and pdate < cutoff_day - timedelta(days=1):
+            continue
+        try:
+            pf = pq.ParquetFile(path)
+            names = set(pf.schema_arrow.names)
+            if not {"event_id", "fetched_at"} <= names:
+                continue
+            cols = [c for c in ("event_id", "fetched_at", "commence_time") if c in names]
+            for batch in pf.iter_batches(batch_size=batch_size, columns=cols):
+                for row in batch.to_pylist():
+                    ts = parse_utc(row.get("fetched_at"))
+                    if ts is None or (cutoff_utc is not None and ts < cutoff_utc):
+                        continue
+                    stats["obs_rows"] += 1
+                    yield row.get("event_id"), ts, row.get("commence_time")
+        except Exception:
+            continue          # an unreadable file is already reported by iter_h2h_snapshots
+
 # ---------------------------------------------------------------------------
 # Archived line_movements (added on the server; merged here)
 # ---------------------------------------------------------------------------
