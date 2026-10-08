@@ -168,6 +168,9 @@ mongoose.connect(process.env.MONGODB_URI)
     }
     warmCache();
     setInterval(warmCache, 4.5 * 60 * 1000);
+    // Reconcile with Stripe on boot and every 15 min, so subscription/payment/
+    // cancellation data in the admin panel never depends on a webhook alone.
+    require('./services/stripeScheduler').startStripeSyncSchedule();
     const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
     const ML_API_URL = process.env.ML_API_URL || 'http://localhost:8000';
     setInterval(() => {
