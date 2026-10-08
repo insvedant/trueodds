@@ -37,6 +37,7 @@ import os
 import sys
 import itertools
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -46,10 +47,14 @@ from loguru import logger
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ml.config import (
-    MONGODB_URI, DB_NAME, COL_ODDS_SNAPSHOTS, COL_STATS,
+    MONGODB_URI, DB_NAME, COL_ODDS_SNAPSHOTS, COL_LINE_MOVEMENTS, COL_STATS,
     ARCHIVE_DIR, LIVE_RETENTION_DAYS,
     ARCHIVE_SUBDIR_ODDS_SNAPSHOTS, DAILY_ARCHIVE_COMPRESSION,
 )
+try:
+    from ml.config import ARCHIVE_SUBDIR_LINE_MOVEMENTS
+except ImportError:                      # an older config.py without the constant
+    ARCHIVE_SUBDIR_LINE_MOVEMENTS = "line_movements"
 
 # Documents per processing batch.  Tune downward on very low-RAM VMs.
 BATCH_SIZE = 500
@@ -74,6 +79,39 @@ def partition_dir(date: datetime) -> str:
     )
 
 
+def line_movement_partition_dir(date: datetime) -> str:
+    """{ARCHIVE_DIR}/line_movements/year=YYYY/month=MM/day=DD/"""
+    return os.path.join(
+        ARCHIVE_DIR, ARCHIVE_SUBDIR_LINE_MOVEMENTS,
+        f"year={date.year:04d}", f"month={date.month:02d}", f"day={date.day:02d}",
+    )
+
+
+def line_movement_batch_path(date: datetime, batch_num: int) -> str:
+    """.../line_movements/year=YYYY/month=MM/day=DD/batch_NNNN.parquet"""
+    return os.path.join(line_movement_partition_dir(date), f"batch_{batch_num:04d}.parquet")
+
+
+def _next_batch_index(partition_path: str, counters: dict, date_key) -> int:
+    """
+    Next unused batch number for a date. The first time a date is seen in a run, look at what is
+    already on disk and continue after it. Before this, every run restarted at batch_0000 and would
+    OVERWRITE files an earlier run had written for the same day (found and fixed on the server;
+    kept here, and shared by the snapshot and line-movement archives).
+    """
+    if date_key not in counters:
+        indices = []
+        for existing in Path(partition_path).glob("batch_*.parquet"):
+            try:
+                indices.append(int(existing.stem.split("_")[1]))
+            except (IndexError, ValueError):
+                continue
+        counters[date_key] = max(indices, default=-1) + 1
+    else:
+        counters[date_key] += 1
+    return counters[date_key]
+
+
 def batch_path(date: datetime, batch_num: int) -> str:
     """
     Full path for one batch file within a day's directory:
@@ -82,6 +120,22 @@ def batch_path(date: datetime, batch_num: int) -> str:
     file is ever read or rewritten to append new rows.
     """
     return os.path.join(partition_dir(date), f"batch_{batch_num:04d}.parquet")
+
+
+def _normalize_line_movement(d: dict) -> dict:
+    """
+    A MongoDB line_movements document as a Parquet-safe row. Numeric fields stay native numbers so
+    archived movements remain directly usable by DuckDB/pandas for training.
+    """
+    row = dict(d)
+    if "_id" in row:
+        row["_id"] = str(row["_id"])
+    ts = row.get("timestamp")
+    if hasattr(ts, "isoformat"):
+        row["timestamp"] = ts.isoformat()
+    elif ts is not None:
+        row["timestamp"] = str(ts)
+    return row
 
 
 def _normalize_doc(d: dict) -> dict:
@@ -218,6 +272,72 @@ def _iter_batches(cursor, size: int):
         yield batch
 
 
+def archive_line_movements() -> dict:
+    """
+    Archive line_movements older than LIVE_RETENTION_DAYS to Parquet, then delete them from Mongo.
+    Same safety rule as snapshots: a batch is deleted from Mongo only after its file is written and
+    verified. (Their schema differs from odds_snapshots, hence the separate directory.)
+    """
+    db = get_db()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=LIVE_RETENTION_DAYS)
+    collection = db[COL_LINE_MOVEMENTS]
+    logger.info(f"Archiving line_movements older than {cutoff.isoformat()} in batches of {BATCH_SIZE}")
+
+    eligible = collection.count_documents({"timestamp": {"$lt": cutoff}})
+    if eligible == 0:
+        logger.info("Nothing to archive — no line_movements older than the retention window.")
+        return {"archived": 0, "partitions": 0}
+    logger.info(f"{eligible:,} line_movements eligible for archival")
+
+    cursor = collection.find({"timestamp": {"$lt": cutoff}}).sort([("timestamp", 1)]).batch_size(BATCH_SIZE)
+    total_archived = 0
+    partition_dates: set = set()
+    batch_counters: dict = {}
+
+    for batch_num, batch_docs in enumerate(_iter_batches(cursor, BATCH_SIZE)):
+        by_date: dict = {}
+        for doc in batch_docs:
+            timestamp = doc.get("timestamp")
+            if isinstance(timestamp, str):
+                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if timestamp is None:
+                continue
+            if hasattr(timestamp, "tzinfo") and timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            by_date.setdefault(timestamp.date(), []).append(doc)
+
+        verified_ids = []
+        for date_key, docs in sorted(by_date.items()):
+            dt = datetime(date_key.year, date_key.month, date_key.day)
+            file_idx = _next_batch_index(line_movement_partition_dir(dt), batch_counters, date_key)
+            path = line_movement_batch_path(dt, file_idx)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            rows = [_normalize_line_movement(d) for d in docs]
+            if not _write_batch_parquet(rows, path):
+                logger.error(f"Skipping line_movements {date_key} batch {file_idx} — write failed")
+                continue
+            if not _verify_batch_parquet(path, len(rows)):
+                logger.error(f"Skipping line_movements {date_key} batch {file_idx} — verify failed")
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                continue
+            verified_ids.extend(d["_id"] for d in docs)
+            total_archived += len(docs)
+            partition_dates.add(date_key)
+            logger.success(f"  {len(docs)} line movements → {path} (verified)")
+
+        if verified_ids:
+            res = collection.delete_many({"_id": {"$in": verified_ids}})
+            logger.info(f"  Deleted {res.deleted_count:,} line_movements from Mongo (batch {batch_num + 1})")
+        del batch_docs, by_date, verified_ids
+        gc.collect()
+
+    logger.success(f"Line movement archive complete — {total_archived:,} docs across {len(partition_dates)} partition date(s)")
+    return {"archived": total_archived, "partitions": len(partition_dates)}
+
+
 def archive_snapshots():
     db = get_db()
     seed_total_snapshots_if_missing(db)
@@ -270,9 +390,8 @@ def archive_snapshots():
 
         for date_key, docs in sorted(by_date.items()):
             dt = datetime(date_key.year, date_key.month, date_key.day)
-            file_idx = batch_counters.get(date_key, 0)
+            file_idx = _next_batch_index(partition_dir(dt), batch_counters, date_key)
             path = batch_path(dt, file_idx)
-            batch_counters[date_key] = file_idx + 1
             os.makedirs(os.path.dirname(path), exist_ok=True)
 
             rows = [_normalize_doc(d) for d in docs]
@@ -315,5 +434,8 @@ def archive_snapshots():
 
 
 if __name__ == "__main__":
-    result = archive_snapshots()
-    logger.success(f"Archive run complete: {result}")
+    snapshot_result = archive_snapshots()
+    logger.success(f"Odds snapshot archive run complete: {snapshot_result}")
+
+    line_movement_result = archive_line_movements()
+    logger.success(f"Line movement archive run complete: {line_movement_result}")
