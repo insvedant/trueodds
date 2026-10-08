@@ -8,7 +8,8 @@ Saves all predictions to MongoDB → Node.js backend reads them.
 
 import numpy as np
 import pandas as pd
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from loguru import logger
 from pymongo import MongoClient
 
@@ -28,6 +29,34 @@ from ml.features import (
     minutes_to_game,
 )
 from ml.models.train import load_model
+from ml.features import parse_utc
+
+# Events whose odds haven't changed are re-predicted at most this often (the only thing that drifts
+# for them is the time left before the game).
+PREDICTION_REFRESH_MINUTES = float(os.environ.get("PREDICTION_REFRESH_MINUTES", 15))
+
+_MODEL_CACHE: dict = {}
+
+
+def _cached_load(name: str):
+    """
+    load_model() read the model file from disk on EVERY call: four loads per event, so 250 events
+    meant ~1,000 file reads per run. Keep each model in memory instead, and reload it automatically
+    when its file changes (i.e. after a retrain), so a long-running process still picks up new models.
+    """
+    from ml.models import train as _train
+    path = os.path.join(_train.MODEL_DIR, f"{name}.joblib")
+    try:
+        stamp = os.stat(path).st_mtime_ns
+    except OSError:
+        return load_model(name)                       # not on disk (yet): let load_model fall back to MongoDB; don't cache
+    hit = _MODEL_CACHE.get(name)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    payload = load_model(name)
+    if payload is not None:
+        _MODEL_CACHE[name] = (stamp, payload)
+    return payload
 
 
 def get_db():
@@ -47,7 +76,7 @@ def predict_clv(features: dict) -> dict:
     Predict closing line value.
     Returns: { value: float, direction: 'better'|'worse'|'stable', confidence: float }
     """
-    payload = load_model(MODEL_CLV)
+    payload = _cached_load(MODEL_CLV)
     if not payload:
         return {"available": False, "reason": "model_not_trained"}
 
@@ -98,7 +127,7 @@ def predict_sharp_money(features: dict) -> dict:
     Predict if sharp money is behind current line movement.
     Returns: { is_sharp: bool, probability: float, signal_strength: str }
     """
-    payload = load_model(MODEL_SHARP)
+    payload = _cached_load(MODEL_SHARP)
     if not payload:
         return {"available": False, "reason": "model_not_trained"}
 
@@ -154,7 +183,7 @@ def predict_arb_window(arb: dict) -> dict:
     Predict how long an arb will last.
     Returns: { minutes: float, urgency: str, advice: str }
     """
-    payload = load_model(MODEL_ARB_WINDOW)
+    payload = _cached_load(MODEL_ARB_WINDOW)
     if not payload:
         return {"available": False, "reason": "model_not_trained"}
 
@@ -211,7 +240,7 @@ def predict_ev_confidence(ev_bet: dict) -> dict:
     Predict confidence score for a +EV bet.
     Returns: { confidence: float, grade: str, recommendation: str }
     """
-    payload = load_model(MODEL_EV_CONF)
+    payload = _cached_load(MODEL_EV_CONF)
     if not payload:
         return {"available": False, "reason": "model_not_trained"}
 
@@ -257,6 +286,31 @@ def predict_ev_confidence(ev_bet: dict) -> dict:
     }
 
 
+def _events_needing_prediction(db, event_ids: list, since, now) -> list:
+    """
+    Which events need a fresh prediction: no prediction yet, an open arbitrage, a new real snapshot
+    since the last prediction (odds changed), or a prediction older than PREDICTION_REFRESH_MINUTES.
+    Three bulk queries instead of one per event.
+    """
+    if not event_ids:
+        return []
+    existing = {d["event_id"]: parse_utc(d.get("generated_at")) for d in
+                db[COL_ML_PREDICTIONS].find({"event_id": {"$in": event_ids}}, {"event_id": 1, "generated_at": 1})}
+    latest_real = {g["_id"]: parse_utc(g["last"]) for g in db[COL_ODDS_SNAPSHOTS].aggregate([
+        {"$match": {"event_id": {"$in": event_ids}, "fetched_at": {"$gte": since}, "is_duplicate": {"$ne": True}}},
+        {"$group": {"_id": "$event_id", "last": {"$max": "$fetched_at"}}},
+    ])}
+    open_arbs = {d["event_id"] for d in db[COL_ARB_HISTORY].find({"event_id": {"$in": event_ids}, "resolved_at": None}, {"event_id": 1})}
+    refresh = timedelta(minutes=PREDICTION_REFRESH_MINUTES)
+    needed = []
+    for event_id in event_ids:
+        last = existing.get(event_id)
+        changed = latest_real.get(event_id) is not None and last is not None and latest_real[event_id] > last
+        if last is None or event_id in open_arbs or changed or now - last >= refresh:
+            needed.append(event_id)
+    return needed
+
+
 def generate_all_predictions():
     """
     Generate predictions for all current events and save to MongoDB.
@@ -272,9 +326,13 @@ def generate_all_predictions():
         {"fetched_at": {"$gte": now.replace(hour=0, minute=0)}}
     )
 
-    logger.info(f"Generating predictions for {len(recent_events)} events")
+    started = time.time()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    needed = _events_needing_prediction(db, recent_events, day_start, now)
+    skipped = len(recent_events) - len(needed)
+    logger.info(f"Generating predictions for {len(needed)} of {len(recent_events)} events ({skipped} unchanged, skipped)")
 
-    for event_id in recent_events:
+    for event_id in needed:
         features = build_features_for_event(event_id, db)
         if not features:
             continue
@@ -305,7 +363,9 @@ def generate_all_predictions():
         )
         stored += 1
 
-    logger.success(f"Saved {stored} predictions to MongoDB")
+    elapsed = time.time() - started
+    logger.success(f"Saved {stored} predictions to MongoDB in {elapsed:.0f}s ({skipped} unchanged events skipped"
+                   + (f", {1000 * elapsed / max(len(needed), 1):.0f} ms per event)" if needed else ")"))
     return stored
 
 
