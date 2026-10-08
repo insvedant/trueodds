@@ -42,7 +42,7 @@ from ml.features import (
     build_features_for_event, american_to_decimal, build_cross_book_features, minutes_to_game,
     build_event_level_features, clean_h2h, parse_utc,
 )
-from ml.parquet_loader import load_historical_parquet, iter_h2h_snapshots, iter_line_movements, new_stream_stats
+from ml.parquet_loader import load_historical_parquet, iter_h2h_snapshots, iter_line_movements, iter_observations, new_stream_stats
 
 os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -210,17 +210,9 @@ def load_model(name: str):
 # ─────────────────────────────────────────────────────────────────────────────
 CLV_ROLLING_DAYS     = int(os.environ.get("CLV_ROLLING_DAYS", 90))   # CLV needs far more history than 30 days gives
 CLV_MIN_EVENTS       = 100        # distinct finished games (samples from one game are correlated)
-CLV_MIN_SPAN_MINUTES = 60         # an event must be observed for at least this long
-# Lead-time bands (minutes before the game): <1h, 1-6h, 6-24h, 24-48h, >48h.
-# One sample per band per event, taken the first time the market is seen in it.
-CLV_BAND_BOUNDS_MIN  = (60, 360, 1440, 2880)
-
-
-def _lead_band(minutes_to_start: float) -> int:
-    for i, bound in enumerate(CLV_BAND_BOUNDS_MIN):
-        if minutes_to_start < bound:
-            return i
-    return len(CLV_BAND_BOUNDS_MIN)
+CLV_MIN_SPAN_MINUTES = 60         # a game must have been watched for at least this long
+# Lead times (minutes before the game) at which the market is sampled: 48h, 24h, 6h and 1h out.
+CLV_LEAD_MINUTES     = (2880, 1440, 360, 60)
 
 
 def _avg_decimal_shift(from_h2h: dict, to_h2h: dict):
@@ -244,69 +236,85 @@ def _avg_decimal_shift(from_h2h: dict, to_h2h: dict):
 
 class _ClvEventAccumulator:
     """
-    Builds a small per-event summary from a STREAM of real snapshots coming from
-    both stores (Mongo and Parquet), in any order. Per event it keeps only the
-    first/last timestamps, the closing snapshot, and one snapshot per lead-time
-    band, so memory grows with the number of events, not the number of rows.
-    Because both stores feed one accumulator, a game that straddles the 7-day
-    Mongo/Parquet boundary becomes ONE event with its true opening and closing,
-    instead of two partial rows.
+    Builds a small per-event summary from streams of documents from BOTH stores (Mongo and Parquet),
+    in any order, so a game that straddles the Mongo/Parquet boundary is ONE event with its true
+    opening and closing rather than two partial rows. Memory grows with the number of events.
+
+    Two kinds of input:
+      add(...)      a REAL snapshot (it exists only when some price changed)
+      observe(...)  that the event was being watched between two moments. Markers are the only
+                    record of a quiet stretch, so this tells us the market was live at a given time.
+
+    The price at a lead time T is "as of" T: the last real snapshot taken at or before kickoff-T.
+    That is correct even if nothing changed inside the window, which matters now that the collector
+    stores a marker (not a full copy) for every unchanged cycle.
     """
 
     def __init__(self):
         self.events = {}
 
+    def _event(self, event_id):
+        ev = self.events.get(event_id)
+        if ev is None:
+            ev = self.events[event_id] = {"commence": None, "first_obs": None, "last_obs": None,
+                                          "asof": {}, "last_pre": None, "last_any": None}
+        return ev
+
+    def observe(self, event_id, first_ts, last_ts, commence_raw=None):
+        if not event_id or first_ts is None or last_ts is None:
+            return
+        ev = self._event(event_id)
+        commence = parse_utc(commence_raw)
+        if commence is not None:
+            ev["commence"] = commence
+        if ev["first_obs"] is None or first_ts < ev["first_obs"]:
+            ev["first_obs"] = first_ts
+        if ev["last_obs"] is None or last_ts > ev["last_obs"]:
+            ev["last_obs"] = last_ts
+
     def add(self, event_id, ts, commence_raw, h2h):
         if not event_id or not h2h:
             return
-        commence = parse_utc(commence_raw)
-        ev = self.events.get(event_id)
-        if ev is None:
-            ev = self.events[event_id] = {
-                "n": 0, "first_ts": ts, "commence": commence, "bands": {}, "last_pre": None, "last_any": None,
-            }
-        ev["n"] += 1
-        if ts < ev["first_ts"]:
-            ev["first_ts"] = ts
-        if commence is not None:
-            ev["commence"] = commence
+        self.observe(event_id, ts, ts, commence_raw)
+        ev = self._event(event_id)
+        commence = ev["commence"]
         if ev["last_any"] is None or ts > ev["last_any"][0]:
             ev["last_any"] = (ts, h2h)
-        if commence is not None:
-            # The closing line is the last price before the game starts.
-            if ts <= commence and (ev["last_pre"] is None or ts > ev["last_pre"][0]):
-                ev["last_pre"] = (ts, h2h)
-            minutes_to_start = (commence - ts).total_seconds() / 60.0
-            if minutes_to_start >= 0:
-                band = _lead_band(minutes_to_start)
-                cur = ev["bands"].get(band)
-                if cur is None or ts < cur[0]:
-                    ev["bands"][band] = (ts, h2h, minutes_to_start)
+        if commence is None:
+            return
+        if ts <= commence and (ev["last_pre"] is None or ts > ev["last_pre"][0]):
+            ev["last_pre"] = (ts, h2h)                    # the closing line: last price before the game starts
+        for lead in CLV_LEAD_MINUTES:
+            if ts <= commence - timedelta(minutes=lead):
+                cur = ev["asof"].get(lead)
+                if cur is None or ts > cur[0]:
+                    ev["asof"][lead] = (ts, h2h)
 
     def samples(self, now, funnel: dict):
         """Yield (features, label, event_id) and fill in the funnel counters."""
         for event_id, ev in self.events.items():
             funnel["events_seen"] += 1
-            # No closing line exists until the game has started, so an upcoming
-            # game has nothing to learn from yet.
-            if ev["commence"] is None or ev["commence"] > now:
+            commence = ev["commence"]
+            # No closing line exists until the game has started.
+            if commence is None or commence > now:
                 funnel["events_not_started"] += 1
                 continue
             close = ev["last_pre"] or ev["last_any"]
-            close_ts, close_h2h = close
-            if ev["n"] < 2 or (close_ts - ev["first_ts"]).total_seconds() < CLV_MIN_SPAN_MINUTES * 60:
+            if close is None or ev["first_obs"] is None or (ev["last_obs"] - ev["first_obs"]).total_seconds() < CLV_MIN_SPAN_MINUTES * 60:
                 funnel["events_too_short"] += 1
                 continue
             made = 0
-            for band in sorted(ev["bands"]):
-                ts, h2h, minutes_to_start = ev["bands"][band]
-                if ts >= close_ts:                      # the closing snapshot itself has nothing left to predict
+            for lead in CLV_LEAD_MINUTES:
+                state = ev["asof"].get(lead)
+                if state is None:                                          # not being tracked that early
                     continue
-                label = _avg_decimal_shift(h2h, close_h2h)
+                if ev["last_obs"] < commence - timedelta(minutes=lead):    # tracking had already stopped by then
+                    continue
+                label = _avg_decimal_shift(state[1], close[1])
                 if label is None:
                     continue
-                feats = build_event_level_features({"h2h": h2h})
-                feats["minutes_to_game"] = float(minutes_to_start)
+                feats = build_event_level_features({"h2h": state[1]})
+                feats["minutes_to_game"] = float(lead)
                 made += 1
                 yield feats, label, event_id
             if made:
@@ -322,11 +330,11 @@ def build_clv_dataset(db):
     """
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=CLV_ROLLING_DAYS)
-    logger.info(f"Building CLV dataset ({CLV_ROLLING_DAYS}-day window, Mongo + Parquet streamed into one timeline per event)...")
+    logger.info(f"Building CLV dataset ({CLV_ROLLING_DAYS}-day window, Mongo + Parquet merged into one timeline per event)...")
 
     acc = _ClvEventAccumulator()
 
-    # Recent history still in Mongo. One pass over real snapshots, h2h only.
+    # Recent history still in Mongo: real snapshots (h2h only) ...
     mongo_rows = 0
     cursor = db[COL_ODDS_SNAPSHOTS].find(
         {"fetched_at": {"$gte": cutoff}, "is_duplicate": {"$ne": True}, "book_odds.h2h": {"$exists": True}},
@@ -339,11 +347,19 @@ def build_clv_dataset(db):
             continue
         mongo_rows += 1
         acc.add(doc.get("event_id"), ts, doc.get("commence_time"), h2h)
+    # ... and, for every event, when it was first and last seen (markers included), summarised server-side.
+    for g in db[COL_ODDS_SNAPSHOTS].aggregate([
+        {"$match": {"fetched_at": {"$gte": cutoff}}},
+        {"$group": {"_id": "$event_id", "first": {"$min": "$fetched_at"}, "last": {"$max": "$fetched_at"}, "commence": {"$max": "$commence_time"}}},
+    ], allowDiskUse=True):
+        acc.observe(g["_id"], parse_utc(g.get("first")), parse_utc(g.get("last")), g.get("commence"))
 
     # Older history archived to Parquet, streamed file by file.
     pq_stats = new_stream_stats()
     for row in iter_h2h_snapshots(cutoff_after=pd.Timestamp(cutoff), stats=pq_stats):
         acc.add(row["event_id"], row["fetched_at"], row["commence_time"], row["h2h"])
+    for event_id, ts, commence_raw in iter_observations(cutoff_after=pd.Timestamp(cutoff), stats=pq_stats):
+        acc.observe(event_id, ts, ts, commence_raw)
 
     funnel = {"events_seen": 0, "events_not_started": 0, "events_too_short": 0,
               "events_no_usable_slice": 0, "events_used": 0}
@@ -369,7 +385,7 @@ def build_clv_dataset(db):
         f"{pq_stats['files_no_odds']} without odds [{pq_stats['rows_odds_lost']:,} non-marker snapshots in them have NO odds], "
         f"{pq_stats['files_unreadable']} unreadable) "
         f"→ {funnel['events_seen']:,} events: {funnel['events_not_started']:,} not started yet, "
-        f"{funnel['events_too_short']:,} observed < {CLV_MIN_SPAN_MINUTES} min, "
+        f"{funnel['events_too_short']:,} watched < {CLV_MIN_SPAN_MINUTES} min, "
         f"{funnel['events_no_usable_slice']:,} with no comparable prices, "
         f"{funnel['events_used']:,} usable → {len(X_rows):,} samples"
     )
