@@ -42,4 +42,9 @@ activityLogSchema.index({ type: 1, createdAt: -1 });
 activityLogSchema.index({ userId: 1, createdAt: -1 });
 activityLogSchema.index({ category: 1, createdAt: -1 });
 activityLogSchema.index({ status: 1, createdAt: -1 });
+// Atomic de-duplication for Stripe lifecycle events. Webhook retries, the
+// invoice.paid / invoice.payment_succeeded pair, and the periodic Stripe sync
+// can all describe the same real-world event; a unique key makes the database
+// (not a check-then-insert race) guarantee it is logged once.
+activityLogSchema.index({ type: 1, 'meta.dedupeKey': 1 }, { unique: true, partialFilterExpression: { 'meta.dedupeKey': { $type: 'string' } } });
 module.exports = mongoose.models.ActivityLog || mongoose.model('ActivityLog', activityLogSchema);
