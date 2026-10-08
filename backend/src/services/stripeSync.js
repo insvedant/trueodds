@@ -2,8 +2,9 @@
  * stripeSync.js — reconcile Stripe into MongoDB.
  *
  * Why this exists: Stripe is the system of record for who is paying and who
- * has cancelled — and customers cancel in the Stripe billing portal, entirely
- * outside TrueOdds. The webhook is the fast path, but a missed or rejected
+ * has cancelled — and a subscription can be cancelled outside TrueOdds (in the
+ * Stripe dashboard, or by a customer through Stripe), without TrueOdds being told
+ * unless the webhook delivers. The webhook is the fast path, but a missed or rejected
  * delivery would otherwise leave the admin panel permanently wrong. This sync
  * is the safety net: it re-reads Stripe and applies anything we don't have.
  *
