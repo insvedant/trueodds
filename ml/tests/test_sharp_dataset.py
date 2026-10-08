@@ -85,7 +85,8 @@ def test_too_little_data_says_how_much(monkeypatch):
 def test_pipeline_matches_independent_pandas_on_a_production_shaped_world(world):
     db, meta, snaps, moves = world
     db["line_movements"].insert_many([dict(m) for m in moves])
-    got = list(db["line_movements"].aggregate(T._sharp_group_pipeline(T.cutoff_date()), allowDiskUse=True))
+    got = [g for g in db["line_movements"].aggregate(T._sharp_group_pipeline(T.cutoff_date()), allowDiskUse=True)
+           if g["first_sharp"] < T._NEVER and g["first_soft"] < T._NEVER]        # groups where both kinds moved
     df = pd.DataFrame(moves)
     df = df[df["timestamp"] >= T.cutoff_date().replace(tzinfo=None)]
     ref = {}
