@@ -28,8 +28,10 @@ optional dependency degrades gracefully instead of breaking training.
 """
 
 import os
+import re
 import sys
 import glob
+from datetime import timedelta, date
 
 import pandas as pd
 from loguru import logger
@@ -226,11 +228,22 @@ def _load_with_pandas(files, cutoff_after, cutoff_before, columns) -> pd.DataFra
     in the primary path above.
     """
     frames = []
+    skipped_missing_cols, skipped_other = 0, 0
     for f in sorted(files):
         try:
             df = pd.read_parquet(f, engine="pyarrow", columns=columns)
         except Exception as e:
-            logger.warning(f"Skipping unreadable parquet file {f}: {e}")
+            # A batch made up only of "unchanged" marker documents has no
+            # book_odds column at all, so asking for it raises
+            # "No match for FieldRef.Name(book_odds)" followed by a dump of the
+            # whole file schema. That is expected (those rows carry no odds),
+            # so count it quietly instead of logging thousands of lines.
+            first_line = str(e).splitlines()[0] if str(e) else type(e).__name__
+            if "No match for FieldRef" in first_line:
+                skipped_missing_cols += 1
+            else:
+                skipped_other += 1
+                logger.warning(f"Skipping unreadable parquet file {f}: {first_line[:200]}")
             continue
 
         if "fetched_at" in df.columns and (cutoff_after is not None or cutoff_before is not None):
@@ -245,6 +258,11 @@ def _load_with_pandas(files, cutoff_after, cutoff_before, columns) -> pd.DataFra
         if not df.empty:
             frames.append(df)
 
+    if skipped_missing_cols or skipped_other:
+        logger.info(
+            f"Parquet fallback skipped {skipped_missing_cols} file(s) lacking the requested columns "
+            f"(marker-only batches) and {skipped_other} unreadable file(s)"
+        )
     if not frames:
         return pd.DataFrame()
 
@@ -254,3 +272,118 @@ def _load_with_pandas(files, cutoff_after, cutoff_before, columns) -> pd.DataFra
     result = pd.concat(frames, ignore_index=True)
     logger.info(f"Loaded {len(result):,} archived rows via pandas fallback from {len(files)} file(s)")
     return result
+
+
+# ---------------------------------------------------------------------------
+# Streaming reader
+# ---------------------------------------------------------------------------
+_PARTITION_RE = re.compile(r"year=(\d{4})[\\/]+month=(\d{1,2})[\\/]+day=(\d{1,2})")
+
+
+def _partition_date(path: str):
+    """The date encoded in a year=/month=/day= archive path, else None."""
+    m = _PARTITION_RE.search(path)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def new_stream_stats() -> dict:
+    return {
+        "files_total": 0, "files_pruned": 0, "files_no_odds": 0, "files_unreadable": 0,
+        "files_read": 0, "rows_read": 0, "rows_real_h2h": 0, "rows_odds_lost": 0,
+    }
+
+
+def iter_h2h_snapshots(cutoff_after=None, stats: dict | None = None, batch_size: int = 2000):
+    """
+    Yield one dict per REAL archived snapshot, one parquet file at a time:
+
+        {"event_id", "fetched_at" (UTC datetime), "commence_time", "h2h" (cleaned)}
+
+    Why this exists: load_historical_parquet() builds ONE pandas DataFrame of
+    every archived row, with the full nested book_odds (h2h + spreads + totals)
+    as Python objects. For the ~240k rows in a 30-day window that is well over
+    a gigabyte on a machine with ~950 MB of RAM, which is how the training run
+    ended up being killed by the out-of-memory killer. This reader instead:
+
+      * skips whole files by the date in their year=/month=/day= path before
+        opening them,
+      * reads only the columns it needs, and only the h2h part of book_odds,
+      * converts a couple of thousand rows at a time and discards them,
+
+    so memory stays proportional to what the caller chooses to keep, not to
+    the size of the archive.
+
+    Counters are accumulated into `stats` (see new_stream_stats()) so callers
+    can log exactly where data was lost.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from ml.features import parse_utc, clean_h2h
+
+    stats = stats if stats is not None else new_stream_stats()
+    for k, v in new_stream_stats().items():
+        stats.setdefault(k, v)
+
+    cutoff_day = cutoff_after.date() if cutoff_after is not None else None
+    cutoff_utc = parse_utc(cutoff_after) if cutoff_after is not None else None
+
+    for path in sorted(_all_files()):
+        stats["files_total"] += 1
+
+        pdate = _partition_date(path)
+        # One day of slack so a timezone edge can never drop a boundary day.
+        if cutoff_day is not None and pdate is not None and pdate < cutoff_day - timedelta(days=1):
+            stats["files_pruned"] += 1
+            continue
+
+        try:
+            pf = pq.ParquetFile(path)
+            schema = pf.schema_arrow
+            names = set(schema.names)
+            if not {"event_id", "fetched_at", "book_odds"} <= names:
+                stats["files_no_odds"] += 1
+                # Such a file is either genuinely all "unchanged" markers, OR a batch whose
+                # real snapshots had their odds dropped by the old archiver bug (that data
+                # is gone). Count the non-marker rows so the log can say how much was lost.
+                if "is_duplicate" in names:
+                    flags = pf.read(columns=["is_duplicate"]).column("is_duplicate").to_pylist()
+                    stats["rows_odds_lost"] += sum(1 for f in flags if f is not True)
+                else:
+                    stats["rows_odds_lost"] += pf.metadata.num_rows
+                continue
+            odds_type = schema.field("book_odds").type
+            if not (pa.types.is_struct(odds_type) and odds_type.get_field_index("h2h") >= 0):
+                stats["files_no_odds"] += 1
+                continue
+
+            cols = [c for c in ("event_id", "fetched_at", "commence_time", "is_duplicate") if c in names]
+            cols.append("book_odds.h2h")
+            stats["files_read"] += 1
+
+            for batch in pf.iter_batches(batch_size=batch_size, columns=cols):
+                for row in batch.to_pylist():
+                    stats["rows_read"] += 1
+                    if row.get("is_duplicate") is True:
+                        continue
+                    h2h = clean_h2h((row.get("book_odds") or {}).get("h2h"))
+                    if not h2h:
+                        continue
+                    ts = parse_utc(row.get("fetched_at"))
+                    if ts is None or (cutoff_utc is not None and ts < cutoff_utc):
+                        continue
+                    stats["rows_real_h2h"] += 1
+                    yield {
+                        "event_id": row.get("event_id"),
+                        "fetched_at": ts,
+                        "commence_time": row.get("commence_time"),
+                        "h2h": h2h,
+                    }
+        except Exception as e:
+            stats["files_unreadable"] += 1
+            first_line = str(e).splitlines()[0] if str(e) else type(e).__name__
+            logger.warning(f"Skipping unreadable parquet file {path}: {first_line[:200]}")
