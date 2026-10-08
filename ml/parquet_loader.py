@@ -58,7 +58,10 @@ def _glob_patterns() -> list[str]:
     """
     patterns = []
 
-    archive_pattern = os.path.join(ARCHIVE_DIR, "**", "*.parquet")
+    # IMPORTANT: only odds_snapshots belong in this loader. line_movements has a different
+    # schema (and lives in its own folder under the archive); it is read by
+    # load_historical_line_movements() / iter_line_movements() below.
+    archive_pattern = os.path.join(ARCHIVE_DIR, "odds_snapshots", "**", "*.parquet")
     legacy_pattern  = os.path.join(LEGACY_ARCHIVE_DIR, "**", "*.parquet")
 
     if os.path.isdir(ARCHIVE_DIR):
@@ -387,3 +390,110 @@ def iter_h2h_snapshots(cutoff_after=None, stats: dict | None = None, batch_size:
             stats["files_unreadable"] += 1
             first_line = str(e).splitlines()[0] if str(e) else type(e).__name__
             logger.warning(f"Skipping unreadable parquet file {path}: {first_line[:200]}")
+
+
+# ---------------------------------------------------------------------------
+# Archived line_movements (added on the server; merged here)
+# ---------------------------------------------------------------------------
+def _line_movement_files() -> list:
+    return glob.glob(os.path.join(ARCHIVE_DIR, "line_movements", "**", "*.parquet"), recursive=True)
+
+
+def load_historical_line_movements(cutoff_after=None, cutoff_before=None, columns=None) -> pd.DataFrame:
+    """
+    Load archived line_movements into ONE DataFrame. Convenient but memory-hungry for long windows;
+    training uses iter_line_movements() below instead.
+    """
+    files = _line_movement_files()
+    if not files:
+        logger.info(f"No line movement parquet files found under {os.path.join(ARCHIVE_DIR, 'line_movements')}")
+        return pd.DataFrame()
+
+    if _HAS_DUCKDB:
+        pattern = os.path.join(ARCHIVE_DIR, "line_movements", "**", "*.parquet")
+        where, params = [], []
+        if cutoff_after is not None:
+            where.append("timestamp >= ?"); params.append(str(cutoff_after))
+        if cutoff_before is not None:
+            where.append("timestamp < ?"); params.append(str(cutoff_before))
+        query = (f"SELECT {', '.join(columns) if columns else '*'} "
+                 f"FROM read_parquet('{pattern}', union_by_name=true) {'WHERE ' + ' AND '.join(where) if where else ''}")
+        con = duckdb.connect()
+        try:
+            df = con.execute(query, params).fetchdf()
+            logger.info(f"Loaded {len(df):,} historical line movements via DuckDB from {len(files)} parquet file(s)")
+            return df
+        except Exception as e:
+            logger.error(f"DuckDB line movement load failed ({e}), falling back to pandas")
+        finally:
+            con.close()
+    return _load_line_movements_with_pandas(files, cutoff_after, cutoff_before, columns)
+
+
+def _load_line_movements_with_pandas(files, cutoff_after, cutoff_before, columns) -> pd.DataFrame:
+    frames = []
+    for f in sorted(files):
+        try:
+            df = pd.read_parquet(f, engine="pyarrow", columns=columns)
+        except Exception as e:
+            logger.warning(f"Skipping unreadable line movement parquet {f}: {str(e).splitlines()[0][:200]}")
+            continue
+        if "timestamp" in df.columns and (cutoff_after is not None or cutoff_before is not None):
+            ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+            mask = pd.Series(True, index=df.index)
+            if cutoff_after is not None:
+                mask &= ts >= cutoff_after
+            if cutoff_before is not None:
+                mask &= ts < cutoff_before
+            df = df[mask]
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    result = pd.concat(frames, ignore_index=True)
+    logger.info(f"Loaded {len(result):,} historical line movements via pandas fallback from {len(files)} file(s)")
+    return result
+
+
+def iter_line_movements(cutoff_after=None, stats: dict | None = None, batch_size: int = 5000):
+    """
+    Stream archived line movements one parquet file at a time, yielding plain dicts
+    {event_id, market, selection, is_sharp_book, timestamp (UTC datetime), prob_change, moved_up,
+    seconds_since_prev}. Same idea as iter_h2h_snapshots(): skip whole files by the date in their
+    path, read only the needed columns, and never hold more than one batch in memory.
+    """
+    import pyarrow.parquet as pq
+    from ml.features import parse_utc
+
+    stats = stats if stats is not None else {}
+    for k in ("files_total", "files_pruned", "files_unreadable", "files_read", "rows_read"):
+        stats.setdefault(k, 0)
+    cutoff_day = cutoff_after.date() if cutoff_after is not None else None
+    cutoff_utc = parse_utc(cutoff_after) if cutoff_after is not None else None
+    wanted = ("event_id", "market", "selection", "is_sharp_book", "timestamp", "prob_change", "moved_up", "seconds_since_prev")
+
+    for path in sorted(_line_movement_files()):
+        stats["files_total"] += 1
+        pdate = _partition_date(path)
+        if cutoff_day is not None and pdate is not None and pdate < cutoff_day - timedelta(days=1):
+            stats["files_pruned"] += 1
+            continue
+        try:
+            pf = pq.ParquetFile(path)
+            names = set(pf.schema_arrow.names)
+            if not {"event_id", "selection", "is_sharp_book", "timestamp"} <= names:
+                stats["files_unreadable"] += 1
+                continue
+            cols = [c for c in wanted if c in names]
+            stats["files_read"] += 1
+            for batch in pf.iter_batches(batch_size=batch_size, columns=cols):
+                for row in batch.to_pylist():
+                    stats["rows_read"] += 1
+                    ts = parse_utc(row.get("timestamp"))
+                    if ts is None or (cutoff_utc is not None and ts < cutoff_utc):
+                        continue
+                    row["timestamp"] = ts
+                    yield row
+        except Exception as e:
+            stats["files_unreadable"] += 1
+            logger.warning(f"Skipping unreadable line movement parquet {path}: {str(e).splitlines()[0][:200] if str(e) else type(e).__name__}")
