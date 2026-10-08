@@ -3,7 +3,11 @@ const { protect, adminOnly } = require('../middleware/auth');
 const User = require('../models/User');
 const Bet = require('../models/Bet');
 const ActivityLog = require('../models/ActivityLog');
-const { syncStripeToMongo } = require('../services/stripeSync');
+const StripeStatus = require('../models/StripeStatus');
+const { runStripeSync } = require('../services/stripeScheduler');
+const { cancelSubscriptionSafe, isStripeConfigured, isWebhookConfigured } = require('../services/stripeService');
+const ledger = require('../services/stripeLedger');
+const { logActivity } = require('../services/logActivity');
 router.use(protect, adminOnly);
 router.get('/overview', async (req, res) => {
     try {
@@ -103,11 +107,82 @@ router.put('/users/:id', async (req, res) => {
         const user = await User.findById(req.params.id);
         if (!user)
             return res.status(404).json({ success: false, message: 'User not found.' });
-        const allowed = ['plan', 'subscriptionStatus', 'isActive', 'role'];
-        allowed.forEach(k => { if (req.body[k] !== undefined)
-            user[k] = req.body[k]; });
+        const { plan, subscriptionStatus, isActive, role } = req.body;
+        const VALID_PLANS = ['free', 'basic', 'gold', 'platinum'];
+        const VALID_STATUS = ['active', 'inactive', 'cancelled', 'trial', 'past_due'];
+        if (plan !== undefined && !VALID_PLANS.includes(plan))
+            return res.status(400).json({ success: false, message: 'Invalid plan.' });
+        if (subscriptionStatus !== undefined && !VALID_STATUS.includes(subscriptionStatus))
+            return res.status(400).json({ success: false, message: 'Invalid status.' });
+        if (role !== undefined && !['user', 'admin'].includes(role))
+            return res.status(400).json({ success: false, message: 'Invalid role.' });
+
+        const before = { plan: user.plan, status: user.subscriptionStatus };
+        const isStop = (s) => s === 'cancelled' || s === 'inactive';
+        // "Stop billing" = the admin moves the user to Cancelled/Inactive, or
+        // removes their plan. Judged on what CHANGED, so re-saving an
+        // unrelated field (the form always sends plan + status) can't cancel
+        // anyone by accident.
+        const stopRequested =
+            (subscriptionStatus !== undefined && isStop(subscriptionStatus) && !isStop(user.subscriptionStatus)) ||
+            (plan === 'free' && user.plan !== 'free');
+        const warnings = [];
+        let stripeCancelled = false;
+
+        if (stopRequested && user.stripeSubscriptionId) {
+            // This used to only edit the MongoDB record, so the Stripe
+            // subscription kept billing the customer after an admin
+            // "cancelled" them. Cancel in Stripe FIRST and only record the
+            // cancellation if Stripe confirms it; if Stripe refuses, save
+            // nothing so the panel never claims a customer is cancelled while
+            // they are still being charged.
+            const subscriptionId = user.stripeSubscriptionId;
+            let result;
+            try {
+                result = await cancelSubscriptionSafe(subscriptionId);
+            }
+            catch (err) {
+                console.error('[Admin] Stripe cancel failed:', err.message);
+                return res.status(502).json({
+                    success: false,
+                    message: `Stripe could not cancel this subscription (${err.message}). Nothing was changed, so the customer is NOT marked cancelled. Cancel it in the Stripe dashboard, then run Sync Stripe.`,
+                });
+            }
+            const ended = result.subscription || { id: subscriptionId, status: 'canceled', customer: user.stripeCustomerId };
+            await ledger.applySubscriptionEnded(user, ended, { by: 'admin' });
+            stripeCancelled = true;
+        }
+        else {
+            if (plan !== undefined) user.plan = plan;
+            if (subscriptionStatus !== undefined) user.subscriptionStatus = subscriptionStatus;
+            const changedBilling = user.plan !== before.plan || user.subscriptionStatus !== before.status;
+            if (user.stripeSubscriptionId && changedBilling) {
+                // Stripe owns plan/status for anyone it bills; the periodic
+                // sync restores Stripe's values. Say so rather than letting
+                // the admin believe an edit stuck.
+                warnings.push('This customer is billed through Stripe, and Stripe is the source of truth for plan and status — this edit will be reverted by the next Stripe sync (every 15 min). To change what they are charged, change their subscription in the Stripe dashboard.');
+            }
+        }
+        if (isActive !== undefined) user.isActive = !!isActive;
+        if (role !== undefined) user.role = role;
         await user.save({ validateBeforeSave: false });
-        res.json({ success: true, user: user.toPublicJSON() });
+
+        if (user.plan !== before.plan || user.subscriptionStatus !== before.status) {
+            logActivity({
+                type: 'admin_user_plan_changed',
+                user,
+                ip: req.ip,
+                message: `${req.user.email} changed ${user.email}: plan ${before.plan} → ${user.plan}, status ${before.status} → ${user.subscriptionStatus}${stripeCancelled ? ' (Stripe subscription cancelled)' : ''}`,
+                meta: { before, after: { plan: user.plan, status: user.subscriptionStatus }, stripeCancelled, adminId: req.user._id },
+            });
+        }
+        res.json({
+            success: true,
+            user: user.toPublicJSON(),
+            stripeCancelled,
+            warnings,
+            message: stripeCancelled ? 'Stripe subscription cancelled — the customer will not be billed again.' : 'User updated.',
+        });
     }
     catch (e) {
         res.status(500).json({ success: false, message: e.message });
@@ -117,6 +192,24 @@ router.delete('/users/:id', async (req, res) => {
     try {
         if (req.params.id === req.user._id.toString())
             return res.status(400).json({ success: false, message: 'Cannot delete yourself.' });
+        const user = await User.findById(req.params.id);
+        if (!user)
+            return res.status(404).json({ success: false, message: 'User not found.' });
+        if (user.stripeSubscriptionId) {
+            // Deleting the account without cancelling the subscription would
+            // leave an orphaned Stripe subscription charging a customer who
+            // no longer has an account.
+            try {
+                await cancelSubscriptionSafe(user.stripeSubscriptionId);
+            }
+            catch (err) {
+                console.error('[Admin] Stripe cancel before delete failed:', err.message);
+                return res.status(502).json({
+                    success: false,
+                    message: `Stripe could not cancel this user's subscription (${err.message}), so the user was NOT deleted — otherwise they would keep being billed with no account. Cancel it in Stripe first.`,
+                });
+            }
+        }
         await User.findByIdAndDelete(req.params.id);
         await Bet.deleteMany({ user: req.params.id });
         res.json({ success: true, message: 'User deleted.' });
@@ -225,12 +318,15 @@ router.get('/revenue/monthly', async (req, res) => {
     }
 });
 
-// POST /api/admin/stripe-sync — reconcile Stripe's paid invoices and
-// subscriptions into MongoDB. Safe to run repeatedly because invoice IDs
-// are used as the payment idempotency key.
+// POST /api/admin/stripe-sync — full reconcile of Stripe into MongoDB
+// (all paid invoices + all subscriptions). Safe to run repeatedly: invoice ids
+// are the idempotency key. The same sync also runs automatically every 15 min.
 router.post('/stripe-sync', async (req, res) => {
     try {
-        const result = await syncStripeToMongo();
+        const result = await runStripeSync({ source: 'manual' });
+        if (result.skipped) {
+            return res.status(409).json({ success: false, message: `Sync not started: ${result.reason}. Try again in a minute.` });
+        }
         res.json({
             success: true,
             message: 'Stripe data synchronized successfully.',
@@ -242,6 +338,48 @@ router.post('/stripe-sync', async (req, res) => {
             success: false,
             message: e.message,
         });
+    }
+});
+
+// GET /api/admin/stripe-status — is the Stripe integration actually working?
+router.get('/stripe-status', async (req, res) => {
+    try {
+        const now = new Date();
+        const [status, staleTrials, billedUsers] = await Promise.all([
+            StripeStatus.getSingleton(),
+            // Trials whose end date has passed but that we still show as
+            // "trial" — each one is a customer Stripe has likely already
+            // charged (or lost) that the panel hasn't caught up with.
+            User.countDocuments({ subscriptionStatus: 'trial', stripeSubscriptionId: { $exists: true, $ne: null }, trialEndsAt: { $lt: now } }),
+            User.countDocuments({ stripeSubscriptionId: { $exists: true, $ne: null } }),
+        ]);
+        res.json({
+            success: true,
+            stripeKeyConfigured: isStripeConfigured(),
+            webhookSecretConfigured: isWebhookConfigured(),
+            webhookUrl: `${req.protocol}://${req.get('host')}/api/webhook/stripe`,
+            autoSync: {
+                enabled: String(process.env.STRIPE_AUTO_SYNC).toLowerCase() !== 'false',
+                intervalMinutes: Math.max(1, Number(process.env.STRIPE_SYNC_INTERVAL_MIN) || 15),
+            },
+            status: {
+                lastWebhookAt: status.lastWebhookAt || null,
+                lastWebhookType: status.lastWebhookType || null,
+                webhookCount: status.webhookCount || 0,
+                lastWebhookError: status.lastWebhookError || null,
+                lastWebhookErrorAt: status.lastWebhookErrorAt || null,
+                lastSyncAt: status.lastSyncAt || null,
+                lastSyncSource: status.lastSyncSource || null,
+                lastSyncResult: status.lastSyncResult || null,
+                lastSyncError: status.lastSyncError || null,
+                lastSyncErrorAt: status.lastSyncErrorAt || null,
+            },
+            staleTrials,
+            billedUsers,
+        });
+    }
+    catch (e) {
+        res.status(500).json({ success: false, message: e.message });
     }
 });
 
