@@ -54,13 +54,14 @@ def predict_clv(features: dict) -> dict:
     model = payload["model"]
     X     = get_feature_row(features)
 
-    # Align columns with training features
+    # Align columns with training features. Missing columns are added in ONE concat (adding them
+    # one at a time fragments the DataFrame); this was fixed on the server and is kept here.
     trained_cols = getattr(model, "feature_names_in_", None)
     if trained_cols is not None:
-        for col in trained_cols:
-            if col not in X.columns:
-                X[col] = 0
-        X = X[trained_cols]
+        missing_cols = [col for col in trained_cols if col not in X.columns]
+        if missing_cols:
+            X = pd.concat([X, pd.DataFrame(0, index=X.index, columns=missing_cols)], axis=1)
+        X = X.reindex(columns=trained_cols, fill_value=0)
 
     try:
         pred = float(model.predict(X)[0])
