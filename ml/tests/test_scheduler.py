@@ -38,9 +38,10 @@ def test_a_busy_event_loop_drops_a_default_job_but_not_one_with_the_nightly_grac
     assert ran == {"default": False, "graced": True}
 
 
-def test_training_and_archive_jobs_are_registered_with_the_grace_and_no_restart_trigger():
+def test_training_is_registered_with_the_grace_and_no_restart_trigger_and_archival_is_not_scheduled_here():
     src = open(R.__file__, encoding="utf-8").read()
-    assert src.count("misfire_grace_time=NIGHTLY_MISFIRE_GRACE_SECONDS") == 2
+    assert src.count("misfire_grace_time=NIGHTLY_MISFIRE_GRACE_SECONDS") == 1
+    assert 'id="archive_snapshots"' not in src          # archival runs outside the scheduler on the server; two archivers must never run at once
     train_registration = src.split("job_train_models,")[1].split("job_archive_snapshots,")[0]
     assert "next_run_time" not in train_registration.replace("No next_run_time=now", "")
 
