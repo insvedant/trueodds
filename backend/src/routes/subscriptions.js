@@ -191,10 +191,11 @@ router.post('/create-with-trial', protect, async (req, res) => {
 router.post('/cancel', protect, async (req, res) => {
     try {
         const user = req.user;
-        if (!user.stripeSubscriptionId) {
-            user.subscriptionStatus = 'cancelled';
-            await user.save({ validateBeforeSave: false });
-            return res.json({ success: true, message: 'Subscription cancelled.' });
+        // Nothing to cancel for free accounts or admin-granted plans with no
+        // Stripe subscription. (This used to flip the status to "cancelled"
+        // while leaving the plan — and access — in place, which meant nothing.)
+        if (!user.stripeSubscriptionId || user.plan === 'free') {
+            return res.status(400).json({ success: false, message: "You don't have an active paid subscription to cancel." });
         }
         // Schedule the cancellation for the end of the paid period (or end of
         // the trial) instead of ending it now. This route used to cancel in
