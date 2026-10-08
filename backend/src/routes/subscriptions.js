@@ -2,7 +2,8 @@ const router = require('express').Router();
 const crypto = require('crypto');
 const { protect } = require('../middleware/auth');
 const User = require('../models/User');
-const { PLAN_META, TRIAL_DAYS, stripe, createSubscriptionWithTrial, cancelSubscription, createSetupIntent, } = require('../services/stripeService');
+const { PLAN_META, TRIAL_DAYS, stripe, createSubscriptionWithTrial, cancelSubscription, cancelSubscriptionSafe, getSubscriptionPeriodEnd, createSetupIntent, } = require('../services/stripeService');
+const ledger = require('../services/stripeLedger');
 const { sendSubscriptionConfirmationEmail, sendOwnerNewSubscriberAlert } = require('../services/emailService');
 const { getLocationFromIp } = require('../services/geoService');
 const { logActivity } = require('../services/logActivity');
@@ -153,7 +154,7 @@ router.post('/create-with-trial', protect, async (req, res) => {
             .catch(err => console.warn('[Email] Subscription confirmation failed:', err.message));
         sendOwnerNewSubscriberAlert({ name: req.user.name, email: req.user.email, plan: planId, billingPeriod, price })
             .catch(err => console.warn('[Email] Owner subscriber alert failed:', err.message));
-        logActivity({ type: 'trial_started', user: req.user, message: `${req.user.name} started a ${meta.name} ${billingPeriod} trial`, meta: { plan: planId, billingPeriod, price } });
+        logActivity({ type: 'trial_started', user: req.user, message: `${req.user.name} started a ${meta.name} ${billingPeriod} trial`, meta: { plan: planId, billingPeriod, price, stripeSubscriptionId: result.subscriptionId, dedupeKey: `trial:${result.subscriptionId}` } });
         getLocationFromIp(req.ip).then(loc => {
             req.user.subscribeIp = req.ip;
             req.user.subscribeLocation = loc;
@@ -189,13 +190,34 @@ router.post('/create-with-trial', protect, async (req, res) => {
 });
 router.post('/cancel', protect, async (req, res) => {
     try {
-        if (req.user.stripeSubscriptionId) {
-            await cancelSubscription(req.user.stripeSubscriptionId);
-            req.user.stripeSubscriptionId = null;
+        const user = req.user;
+        if (!user.stripeSubscriptionId) {
+            user.subscriptionStatus = 'cancelled';
+            await user.save({ validateBeforeSave: false });
+            return res.json({ success: true, message: 'Subscription cancelled.' });
         }
-        req.user.subscriptionStatus = 'cancelled';
-        await req.user.save({ validateBeforeSave: false });
-        res.json({ success: true, message: 'Subscription cancelled. Access continues until period ends.' });
+        // Schedule the cancellation for the end of the paid period (or end of
+        // the trial) instead of ending it now. This route used to cancel in
+        // Stripe immediately, wipe the subscription id, and then tell the
+        // customer "access continues until period ends" — which wasn't true,
+        // and left TrueOdds with no record of which Stripe subscription it
+        // was. Keeping the id means the Stripe events that follow still match
+        // this user, and the plan is removed when Stripe confirms the end.
+        const result = await cancelSubscriptionSafe(user.stripeSubscriptionId, { atPeriodEnd: true });
+        if (result.alreadyEnded) {
+            const ended = result.subscription || { id: user.stripeSubscriptionId, status: 'canceled', customer: user.stripeCustomerId };
+            await ledger.applySubscriptionEnded(user, ended, { notify: true });
+            return res.json({ success: true, message: 'Subscription cancelled.' });
+        }
+        await ledger.applySubscriptionState(user, result.subscription, { notify: true });
+        const accessUntil = getSubscriptionPeriodEnd(result.subscription) || user.subscriptionExpiry || user.trialEndsAt || null;
+        res.json({
+            success: true,
+            accessUntil,
+            message: accessUntil
+                ? `Subscription cancelled. You keep full access until ${new Date(accessUntil).toLocaleDateString('en-US')} and will not be charged again.`
+                : 'Subscription cancelled. You will not be charged again.',
+        });
     }
     catch (err) {
         res.status(500).json({ success: false, message: err.message });
