@@ -42,7 +42,7 @@ from ml.features import (
     build_features_for_event, american_to_decimal, build_cross_book_features, minutes_to_game,
     build_event_level_features, clean_h2h, parse_utc,
 )
-from ml.parquet_loader import load_historical_parquet, iter_h2h_snapshots, new_stream_stats
+from ml.parquet_loader import load_historical_parquet, iter_h2h_snapshots, iter_line_movements, new_stream_stats
 
 os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -465,10 +465,12 @@ SHARP_MIN_PER_CLASS = 25     # each outcome must occur at least this often, or t
 # Stand-in for "this kind of book never moved". Using a sentinel date (instead of
 # null) means the earliest-move calculation doesn't depend on how $min treats nulls.
 _NEVER = datetime(9999, 12, 31)
+_NEVER_UTC = _NEVER.replace(tzinfo=timezone.utc)
 
 
 def _sharp_group_pipeline(cutoff):
     is_sharp = {"$eq": ["$is_sharp_book", True]}
+    has_gap = {"$gt": ["$seconds_since_prev", 0]}
     return [
         {"$match": {"timestamp": {"$gte": cutoff}}},
         {"$group": {
@@ -480,47 +482,115 @@ def _sharp_group_pipeline(cutoff):
             "sum_prob_change": {"$sum": "$prob_change"},
             "max_abs_prob_change": {"$max": {"$abs": "$prob_change"}},
             "n_up": {"$sum": {"$cond": [{"$eq": ["$moved_up", True]}, 1, 0]}},
-            "avg_gap_seconds": {"$avg": "$seconds_since_prev"},
+            # Sums, not averages, so summaries from Mongo and from the archive can be combined exactly.
+            "sum_gap_seconds": {"$sum": {"$cond": [has_gap, "$seconds_since_prev", 0]}},
+            "n_gap": {"$sum": {"$cond": [has_gap, 1, 0]}},
         }},
-        # "Who moved first" needs both kinds of book to have moved.
-        {"$match": {"first_sharp": {"$lt": _NEVER}, "first_soft": {"$lt": _NEVER}}},
+        # No "both kinds moved" filter here: one half of a group can live in Mongo and the other in the archive.
     ]
+
+
+class _MovementGroups:
+    """
+    Per (event, market, selection) summary of line movements, merged from MongoDB (recent, already
+    aggregated server-side) and from the Parquet archive (older, streamed row by row). Your server
+    deletes movements from Mongo after LIVE_RETENTION_DAYS, so Mongo alone only covers about a week
+    of the 30-day window.
+    slot = [n_total, n_sharp, first_sharp, first_soft, sum_prob, max_abs_prob, n_up, sum_gap, n_gap]
+    """
+
+    def __init__(self):
+        self.groups = {}
+
+    def _slot(self, key):
+        slot = self.groups.get(key)
+        if slot is None:
+            slot = self.groups[key] = [0, 0, None, None, 0.0, 0.0, 0, 0.0, 0]
+        return slot
+
+    @staticmethod
+    def _earlier(current, candidate):
+        return candidate if candidate is not None and (current is None or candidate < current) else current
+
+    def add_mongo_group(self, g):
+        _id = g["_id"]
+        slot = self._slot((_id.get("event_id"), _id.get("market"), _id.get("selection")))
+        first_sharp, first_soft = parse_utc(g.get("first_sharp")), parse_utc(g.get("first_soft"))
+        slot[0] += int(g["n_total"])
+        slot[1] += int(g["n_sharp"])
+        slot[2] = self._earlier(slot[2], None if first_sharp is None or first_sharp >= _NEVER_UTC else first_sharp)
+        slot[3] = self._earlier(slot[3], None if first_soft is None or first_soft >= _NEVER_UTC else first_soft)
+        slot[4] += float(g.get("sum_prob_change") or 0.0)
+        slot[5] = max(slot[5], float(g.get("max_abs_prob_change") or 0.0))
+        slot[6] += int(g.get("n_up") or 0)
+        slot[7] += float(g.get("sum_gap_seconds") or 0.0)
+        slot[8] += int(g.get("n_gap") or 0)
+
+    def add_archived_row(self, row):
+        slot = self._slot((row.get("event_id"), row.get("market"), row.get("selection")))
+        ts = row["timestamp"]
+        slot[0] += 1
+        if row.get("is_sharp_book") is True:
+            slot[1] += 1
+            slot[2] = self._earlier(slot[2], ts)
+        else:
+            slot[3] = self._earlier(slot[3], ts)
+        change = row.get("prob_change")
+        if isinstance(change, (int, float)) and change == change:
+            slot[4] += change
+            slot[5] = max(slot[5], abs(change))
+        if row.get("moved_up") is True:
+            slot[6] += 1
+        gap = row.get("seconds_since_prev")
+        if isinstance(gap, (int, float)) and gap == gap and gap > 0:
+            slot[7] += gap
+            slot[8] += 1
 
 
 def build_sharp_money_dataset(db):
     """Returns (X, y, info). X is None when the data can't support a model; info says why."""
-    logger.info(f"Building sharp money dataset ({ROLLING_DAYS}-day window, sharp AND soft movements)...")
+    logger.info(f"Building sharp money dataset ({ROLLING_DAYS}-day window: Mongo + archived movements, sharp AND soft)...")
     cutoff = cutoff_date()
+    merged = _MovementGroups()
 
-    groups = list(db[COL_LINE_MOVEMENTS].aggregate(_sharp_group_pipeline(cutoff), allowDiskUse=True))
+    mongo_groups = 0
+    for g in db[COL_LINE_MOVEMENTS].aggregate(_sharp_group_pipeline(cutoff), allowDiskUse=True):
+        merged.add_mongo_group(g)
+        mongo_groups += 1
 
-    X_rows, y_vals, ties = [], [], 0
-    for g in groups:
-        first_sharp, first_soft = g["first_sharp"], g["first_soft"]
-        # Both moved in the same poll cycle: timestamps are poll times, so this
-        # carries no information about who led. Don't invent a label for it.
+    archive_stats = {}
+    for row in iter_line_movements(cutoff_after=pd.Timestamp(cutoff), stats=archive_stats):
+        merged.add_archived_row(row)
+
+    X_rows, y_vals, ties, both = [], [], 0, 0
+    for n_total, n_sharp, first_sharp, first_soft, sum_prob, max_abs, n_up, sum_gap, n_gap in merged.groups.values():
+        # "Who moved first" needs both kinds of book to have moved.
+        if first_sharp is None or first_soft is None:
+            continue
+        both += 1
+        # Same poll cycle: timestamps are poll times, so this says nothing about who led.
         if first_sharp == first_soft:
             ties += 1
             continue
-        n_total = max(int(g["n_total"]), 1)
-        gap_seconds = g.get("avg_gap_seconds") or 0.0
+        n_total = max(int(n_total), 1)
         X_rows.append({
-            "n_sharp_moves":   int(g["n_sharp"]),
-            "avg_prob_change": float(g.get("sum_prob_change") or 0.0) / n_total,
-            "max_prob_change": float(g.get("max_abs_prob_change") or 0.0),
+            "n_sharp_moves":   int(n_sharp),
+            "avg_prob_change": sum_prob / n_total,
+            "max_prob_change": max_abs,
             "total_moves":     n_total,
-            "sharp_ratio":     int(g["n_sharp"]) / n_total,
-            "moved_up_ratio":  int(g.get("n_up") or 0) / n_total,
-            "velocity":        n_total / max(gap_seconds / 60, 1),
+            "sharp_ratio":     int(n_sharp) / n_total,
+            "moved_up_ratio":  int(n_up) / n_total,
+            "velocity":        n_total / max((sum_gap / n_gap if n_gap else 0.0) / 60, 1),
         })
         y_vals.append(int(first_sharp < first_soft))
 
     positives = int(sum(y_vals))
     negatives = len(y_vals) - positives
-    info = {"groups_with_both": len(groups), "ties_skipped": ties, "samples": len(y_vals),
+    info = {"groups_with_both": both, "ties_skipped": ties, "samples": len(y_vals),
             "sharp_led": positives, "soft_led": negatives, "needed_samples": MIN_TRAINING_ROWS,
-            "needed_per_class": SHARP_MIN_PER_CLASS}
-    logger.info(f"Sharp data: {len(groups):,} (event, market, selection) groups where sharp and soft books both moved → "
+            "needed_per_class": SHARP_MIN_PER_CLASS, "mongo_groups": mongo_groups, "archive": archive_stats}
+    logger.info(f"Sharp data: {mongo_groups:,} groups from Mongo + {archive_stats.get('rows_read', 0):,} archived movements "
+                f"({archive_stats.get('files_read', 0)} files) → {both:,} groups where sharp and soft both moved → "
                 f"{ties:,} ties skipped → {len(y_vals):,} samples ({positives:,} sharp led / {negatives:,} soft led)")
 
     if len(y_vals) < MIN_TRAINING_ROWS:
