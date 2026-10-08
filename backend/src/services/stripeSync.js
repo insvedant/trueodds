@@ -1,310 +1,121 @@
+/**
+ * stripeSync.js — reconcile Stripe into MongoDB.
+ *
+ * Why this exists: Stripe is the system of record for who is paying and who
+ * has cancelled — and customers cancel in the Stripe billing portal, entirely
+ * outside TrueOdds. The webhook is the fast path, but a missed or rejected
+ * delivery would otherwise leave the admin panel permanently wrong. This sync
+ * is the safety net: it re-reads Stripe and applies anything we don't have.
+ *
+ * It uses the same ledger functions as the webhook, is safe to run repeatedly
+ * and concurrently, and never double-counts a payment (invoice ids are the
+ * idempotency key, enforced atomically).
+ *
+ * options.sinceDays  limit the invoice scan to recent invoices (scheduled
+ *                    runs). Omit for a full historical backfill (manual run).
+ */
 const User = require('../models/User');
-const ActivityLog = require('../models/ActivityLog');
 const { stripe } = require('./stripeService');
+const ledger = require('./stripeLedger');
 
-async function listAllPaidInvoices() {
-    const invoices = [];
+const DAY = 24 * 60 * 60 * 1000;
+// Only email/notify for things that just happened. A backfill of old history
+// must never spam the owner with stale "trial converted" alerts.
+const FRESH_MS = 2 * DAY;
+
+async function listAll(resource, params) {
+    const items = [];
     let startingAfter;
-
     while (true) {
-        const params = {
-            status: 'paid',
-            limit: 100,
-        };
-
-        if (startingAfter) params.starting_after = startingAfter;
-
-        const page = await stripe.invoices.list(params);
-        invoices.push(...page.data);
-
+        const page = await stripe[resource].list({ ...params, limit: 100, ...(startingAfter ? { starting_after: startingAfter } : {}) });
+        items.push(...page.data);
         if (!page.has_more || page.data.length === 0) break;
         startingAfter = page.data[page.data.length - 1].id;
     }
-
-    return invoices.sort((a, b) => (a.created || 0) - (b.created || 0));
+    return items;
 }
 
-async function listAllSubscriptions() {
-    const subscriptions = [];
-    let startingAfter;
+async function syncStripeToMongo({ sinceDays = null } = {}) {
+    const users = await User.find({ stripeCustomerId: { $exists: true, $ne: null } }).select('_id stripeCustomerId');
+    const userIdByCustomer = new Map(users.map(u => [String(u.stripeCustomerId), u._id]));
 
-    while (true) {
-        const params = {
-            status: 'all',
-            limit: 100,
-        };
+    const summary = {
+        usersScanned: users.length,
+        invoicesSeen: 0,
+        usersMatched: 0,
+        paymentsAdded: 0,
+        conversionLogsAdded: 0,
+        subscriptionsSeen: 0,
+        subscriptionsUpdated: 0,
+        cancellationsLogged: 0,
+        totalsCorrected: 0,
+        mode: sinceDays ? `last ${sinceDays} days` : 'full history',
+    };
 
-        if (startingAfter) params.starting_after = startingAfter;
-
-        const page = await stripe.subscriptions.list(params);
-        subscriptions.push(...page.data);
-
-        if (!page.has_more || page.data.length === 0) break;
-        startingAfter = page.data[page.data.length - 1].id;
-    }
-
-    return subscriptions;
-}
-
-function mapSubscriptionStatus(status) {
-    if (status === 'active') return 'active';
-    if (status === 'trialing') return 'trial';
-    if (status === 'past_due' || status === 'unpaid') return 'past_due';
-    if (status === 'canceled' || status === 'incomplete_expired') return 'cancelled';
-    return null;
-}
-
-function basePlanFromMetadata(subscription) {
-    const raw = subscription?.metadata?.plan || '';
-    return raw.replace('_yearly', '') || null;
-}
-
-async function syncStripeToMongo() {
-    const users = await User.find({
-        stripeCustomerId: { $exists: true, $ne: null }
-    });
-
-    const byCustomer = new Map(
-        users.map(user => [String(user.stripeCustomerId), user])
-    );
-
-    let invoicesSeen = 0;
-    let paymentsAdded = 0;
-    let paymentLogsAdded = 0;
-    let conversionLogsAdded = 0;
-    let subscriptionsUpdated = 0;
-    let usersMatched = 0;
-
-    // 1. Reconcile every paid Stripe invoice into User.payments/totalPaid
-    // and the admin activity log.
-    const invoices = await listAllPaidInvoices();
+    // 1. Payments — every paid invoice for a known customer.
+    const invoiceParams = { status: 'paid' };
+    if (sinceDays) invoiceParams.created = { gte: Math.floor((Date.now() - sinceDays * DAY) / 1000) };
+    const invoices = (await listAll('invoices', invoiceParams)).sort((a, b) => (a.created || 0) - (b.created || 0));
 
     for (const invoice of invoices) {
-        const amount = Number(invoice.amount_paid || 0) / 100;
-        if (amount <= 0) continue;
+        if (!(Number(invoice.amount_paid || 0) > 0)) continue;
+        summary.invoicesSeen++;
 
-        invoicesSeen++;
+        const userId = userIdByCustomer.get(String(invoice.customer?.id || invoice.customer));
+        if (!userId) continue;
+        summary.usersMatched++;
 
-        const user = byCustomer.get(String(invoice.customer));
+        const user = await User.findById(userId);
         if (!user) continue;
 
-        usersMatched++;
-
-        const existingPayment = (user.payments || []).find(
-            p => p.stripeInvoiceId === invoice.id
-        );
-        const wasFirstPayment = (user.payments || []).length === 0;
-
-        const paymentDate = invoice.created
-            ? new Date(invoice.created * 1000)
-            : new Date();
-
-        if (!existingPayment) {
-            user.payments.push({
-                amount,
-                plan: user.plan,
-                stripeInvoiceId: invoice.id,
-                status: 'completed',
-                date: paymentDate,
-            });
-
-            user.totalPaid = (user.totalPaid || 0) + amount;
-            user.subscriptionStatus = 'active';
-
-            if (invoice.subscription) {
-                user.stripeSubscriptionId = invoice.subscription;
-            }
-
-            const periodEnd = invoice?.lines?.data?.[0]?.period?.end;
-            if (periodEnd) {
-                user.subscriptionExpiry = new Date(periodEnd * 1000);
-            }
-
-            await user.save({ validateBeforeSave: false });
-            paymentsAdded++;
-        } else if (existingPayment.amount !== amount || existingPayment.status !== 'completed') {
-            existingPayment.amount = amount;
-            existingPayment.status = 'completed';
-            await user.save({ validateBeforeSave: false });
-        }
-
-        if (!await ActivityLog.exists({
-            type: 'payment_succeeded',
-            'meta.invoiceId': invoice.id,
-        })) {
-            await ActivityLog.create({
-                type: 'payment_succeeded',
-                category: 'subscription',
-                status: 'success',
-                message: `Payment of $${amount.toFixed(2)} for ${user.plan} plan`,
-                userId: user._id,
-                email: user.email,
-                name: user.name,
-                role: user.role || 'user',
-                meta: {
-                    amount,
-                    currency: invoice.currency || 'usd',
-                    plan: user.plan,
-                    invoiceId: invoice.id,
-                    stripeSubscriptionId: invoice.subscription || user.stripeSubscriptionId || null,
-                    billingReason: invoice.billing_reason || null,
-                },
-                createdAt: paymentDate,
-            });
-            paymentLogsAdded++;
-        }
-
-        const trialEnd = user.trialEndsAt ? new Date(user.trialEndsAt) : null;
-        const isTrialConversion =
-            !!trialEnd &&
-            paymentDate >= trialEnd &&
-            wasFirstPayment;
-
-        if (
-            isTrialConversion &&
-            !await ActivityLog.exists({
-                type: 'subscription_activated',
-                'meta.invoiceId': invoice.id,
-            })
-        ) {
-            await ActivityLog.create({
-                type: 'subscription_activated',
-                category: 'subscription',
-                status: 'success',
-                message: `${user.name}'s trial converted to a paid ${user.plan} subscription — $${amount.toFixed(2)} charged`,
-                userId: user._id,
-                email: user.email,
-                name: user.name,
-                role: user.role || 'user',
-                meta: {
-                    plan: user.plan,
-                    amount,
-                    currency: invoice.currency || 'usd',
-                    invoiceId: invoice.id,
-                    stripeSubscriptionId: invoice.subscription || user.stripeSubscriptionId || null,
-                    previousStatus: 'trial',
-                    newStatus: 'active',
-                    trialEndedAt: user.trialEndsAt || null,
-                    subscriptionExpiry: user.subscriptionExpiry || null,
-                },
-                createdAt: paymentDate,
-            });
-            conversionLogsAdded++;
-        }
+        const fresh = Date.now() - (invoice.created || 0) * 1000 < FRESH_MS;
+        const result = await ledger.applyPaidInvoice(user, invoice, { updateState: false, notify: fresh });
+        if (result.isNewPayment) summary.paymentsAdded++;
+        if (result.conversionLogged) summary.conversionLogsAdded++;
     }
 
-    // Normalize each user's aggregate total from the payment ledger so
-    // the admin dashboard cannot drift from the actual recorded invoices.
-    for (const user of users) {
-        const ledgerTotal = (user.payments || []).reduce(
-            (sum, payment) => sum + (Number(payment.amount) || 0),
-            0
-        );
-        if (Math.abs((user.totalPaid || 0) - ledgerTotal) > 0.000001) {
-            user.totalPaid = ledgerTotal;
-            await user.save({ validateBeforeSave: false });
-        }
-    }
-
-    // 2. Reconcile subscription status/trial/expiry for every Stripe
-    // subscription belonging to a known TrueOdds customer.
-    const subscriptions = await listAllSubscriptions();
+    // 2. Subscriptions — authoritative for status / plan / trial end / renewal /
+    // scheduled cancellation. Ended ones go first so that a customer who
+    // cancelled and later re-subscribed finishes on the NEW subscription.
+    const subscriptions = await listAll('subscriptions', { status: 'all' });
+    subscriptions.sort((a, b) => {
+        const aEnded = ledger.ENDED_STATUSES.has(a.status) ? 0 : 1;
+        const bEnded = ledger.ENDED_STATUSES.has(b.status) ? 0 : 1;
+        return aEnded - bEnded || (a.created || 0) - (b.created || 0);
+    });
 
     for (const sub of subscriptions) {
-        const user = byCustomer.get(String(sub.customer));
+        const userId = userIdByCustomer.get(String(sub.customer?.id || sub.customer));
+        if (!userId) continue;
+        summary.subscriptionsSeen++;
+
+        const user = await User.findById(userId);
         if (!user) continue;
 
-        let changed = false;
+        const endedAtMs = (sub.ended_at || sub.canceled_at || 0) * 1000;
+        const justHappened = endedAtMs ? Date.now() - endedAtMs < FRESH_MS : true;
 
-        if (user.stripeSubscriptionId !== sub.id) {
-            // Prefer the current non-cancelled subscription.
-            if (!['canceled', 'incomplete_expired'].includes(sub.status)) {
-                user.stripeSubscriptionId = sub.id;
-                changed = true;
-            }
-        }
+        const result = await ledger.applySubscriptionState(user, sub, { notify: justHappened });
+        if (result.changed) summary.subscriptionsUpdated++;
+        if (result.cancellationLogged) summary.cancellationsLogged++;
 
-        const mappedStatus = mapSubscriptionStatus(sub.status);
+        const current = result.user || user;
+        await ledger.ensureTrialStartedLogged(current, sub);
+    }
 
-        // Never let an old canceled subscription overwrite a newer active
-        // subscription for the same customer.
-        if (
-            mappedStatus === 'cancelled' &&
-            user.stripeSubscriptionId !== sub.id
-        ) {
-            continue;
-        }
-
-        if (mappedStatus && user.subscriptionStatus !== mappedStatus) {
-            user.subscriptionStatus = mappedStatus;
-            changed = true;
-        }
-
-        if (sub.trial_end) {
-            const trialEndsAt = new Date(sub.trial_end * 1000);
-            if (!user.trialEndsAt || user.trialEndsAt.getTime() !== trialEndsAt.getTime()) {
-                user.trialEndsAt = trialEndsAt;
-                changed = true;
-            }
-        }
-
-        if (sub.current_period_end) {
-            const expiry = new Date(sub.current_period_end * 1000);
-            if (!user.subscriptionExpiry || user.subscriptionExpiry.getTime() !== expiry.getTime()) {
-                user.subscriptionExpiry = expiry;
-                changed = true;
-            }
-        }
-
-        const plan = basePlanFromMetadata(sub);
-        if (plan && ['basic', 'gold', 'platinum'].includes(plan) && user.plan !== plan && mappedStatus !== 'cancelled') {
-            user.plan = plan;
-            changed = true;
-        }
-
-        if (changed) {
-            await user.save({ validateBeforeSave: false });
-            subscriptionsUpdated++;
-        }
-
-        if (
-            sub.status === 'trialing' &&
-            user.trialEndsAt &&
-            !await ActivityLog.exists({
-                type: 'trial_started',
-                'meta.stripeSubscriptionId': sub.id,
-            })
-        ) {
-            await ActivityLog.create({
-                type: 'trial_started',
-                category: 'subscription',
-                status: 'success',
-                message: `${user.name} started a ${user.plan} trial`,
-                userId: user._id,
-                email: user.email,
-                name: user.name,
-                role: user.role || 'user',
-                meta: {
-                    plan: user.plan,
-                    stripeSubscriptionId: sub.id,
-                    trialEndsAt: user.trialEndsAt,
-                },
-                createdAt: sub.start_date
-                    ? new Date(sub.start_date * 1000)
-                    : new Date(),
-            });
+    // 3. Keep each user's running total equal to the sum of their ledger, so
+    // the aggregate shown in the Users tab can never drift from the invoices.
+    for (const userId of userIdByCustomer.values()) {
+        const user = await User.findById(userId).select('payments totalPaid');
+        if (!user) continue;
+        const ledgerTotal = (user.payments || []).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+        if (Math.abs((user.totalPaid || 0) - ledgerTotal) > 0.005) {
+            await User.updateOne({ _id: userId }, { $set: { totalPaid: Math.round(ledgerTotal * 100) / 100 } });
+            summary.totalsCorrected++;
         }
     }
 
-    return {
-        invoicesSeen,
-        usersMatched,
-        paymentsAdded,
-        paymentLogsAdded,
-        conversionLogsAdded,
-        subscriptionsUpdated,
-        usersScanned: users.length,
-    };
+    return summary;
 }
 
 module.exports = { syncStripeToMongo };
