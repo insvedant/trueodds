@@ -6,7 +6,7 @@ APScheduler-based job runner for the ML pipeline.
 Jobs:
   Every 60s  → collect_snapshot()          — store new odds to MongoDB
   Every 5min → generate_all_predictions()  — run ML predictions
-  Daily 00:00 UTC → train_all_models()     — retrain models (in a separate process)
+  Daily (TRAIN_HOUR_UTC) → train_all_models()  — retrain models (in a separate process)
   On startup → import_historical()         — seed historical data (once)
 
 Run: python -m ml.scheduler.run
@@ -21,6 +21,8 @@ import signal
 import sys
 
 import os
+
+import shutil
 
 from collections import deque
 
@@ -72,7 +74,10 @@ async def job_collect_data():
 
         from ml.collect_data import collect_snapshot
 
-        result = await collect_snapshot()
+        # collect_snapshot() is async, but the MongoDB calls inside it are blocking, which froze this
+        # scheduler for ~3 minutes of every 5 (and made other jobs get skipped). Run it on its own thread
+        # with its own event loop so everything else keeps being scheduled on time.
+        result = await asyncio.to_thread(lambda: asyncio.run(collect_snapshot()))
 
         logger.info(f"[COLLECT] {result}")
 
@@ -90,7 +95,7 @@ async def job_generate_predictions():
 
         from ml.models.predict import generate_all_predictions
 
-        count = generate_all_predictions()
+        count = await asyncio.to_thread(generate_all_predictions)     # synchronous and CPU-heavy: keep it off the event loop
 
         logger.info(f"[PREDICT] Generated {count} predictions")
 
@@ -108,6 +113,10 @@ TRAIN_TIMEOUT_SECONDS = 3 * 3600
 # it for minutes at a time, so with the default the 00:00 training run was being
 # skipped ("Run time of job job_train_models ... was missed by 0:01:18").
 NIGHTLY_MISFIRE_GRACE_SECONDS = 3 * 3600
+FREQUENT_MISFIRE_GRACE_SECONDS = 120      # collection / predictions: a run up to 2 minutes late is still worth doing
+# Training is the heaviest job, so it runs at the quietest hour for a Canada/US audience:
+# 08:00 UTC = 4 am Eastern / 1 am Pacific. Override with TRAIN_HOUR_UTC=0 (etc.) in the environment.
+TRAIN_HOUR_UTC = int(os.environ.get("TRAIN_HOUR_UTC", 8))
 
 _heavy_lock = None
 
@@ -160,8 +169,11 @@ async def job_train_models():
     async with _get_heavy_lock():
         logger.info("[TRAIN] Starting nightly training (separate process)")
         try:
+            # Lower CPU priority (nice 10): when the server is busy, the collector and the website
+            # are served first and training simply takes a little longer.
+            niceness = [shutil.which("nice"), "-n", "10"] if shutil.which("nice") else []
             outcome = await run_logged_subprocess(
-                [sys.executable, "-m", "ml.models.train"], cwd=PROJECT_ROOT, timeout=TRAIN_TIMEOUT_SECONDS)
+                niceness + [sys.executable, "-m", "ml.models.train"], cwd=PROJECT_ROOT, timeout=TRAIN_TIMEOUT_SECONDS)
         except Exception as e:
             logger.error(f"[TRAIN] Could not start training: {e}")
             return
@@ -315,6 +327,8 @@ async def main():
 
         coalesce=True,
 
+        misfire_grace_time=FREQUENT_MISFIRE_GRACE_SECONDS,
+
     )
 
 
@@ -333,6 +347,8 @@ async def main():
 
         coalesce=True,
 
+        misfire_grace_time=FREQUENT_MISFIRE_GRACE_SECONDS,
+
     )
 
 
@@ -343,7 +359,7 @@ async def main():
 
         job_train_models,
 
-        trigger=CronTrigger(hour=0, minute=0),
+        trigger=CronTrigger(hour=TRAIN_HOUR_UTC, minute=0),
 
         id="train_models",
 
@@ -373,7 +389,7 @@ async def main():
 
     logger.info(f"  🤖 Predictions:       every 5 min")
 
-    logger.info("  🧠 Model retraining:  daily at 00:00 UTC (separate process)")
+    logger.info(f"  🧠 Model retraining:  daily at {TRAIN_HOUR_UTC:02d}:00 UTC (separate process)")
 
 
 
