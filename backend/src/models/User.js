@@ -13,6 +13,9 @@ const userSchema = new mongoose.Schema({
     trialEndsAt: Date,
     stripeCustomerId: String,
     stripeSubscriptionId: String,
+    // True when the customer (or Stripe) has scheduled the subscription to end
+    // at the close of the current paid period. Access continues until then.
+    cancelAtPeriodEnd: { type: Boolean, default: false },
     totalPaid: { type: Number, default: 0 },
     // Basic-plan users get 3 free Promo Converter calculations, then must
     // upgrade to Gold/Platinum for unlimited use. Gold/Platinum never check this.
@@ -88,6 +91,7 @@ userSchema.methods.toPublicJSON = function () {
         plan: this.plan,
         subscriptionStatus: this.subscriptionStatus,
         subscriptionExpiry: this.subscriptionExpiry,
+        cancelAtPeriodEnd: this.cancelAtPeriodEnd,
         trialEndsAt: this.trialEndsAt,
         totalPaid: this.totalPaid,
         promoConverterUses: this.promoConverterUses,
