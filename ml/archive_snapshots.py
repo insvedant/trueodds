@@ -105,7 +105,20 @@ def _write_batch_parquet(rows: list, path: str) -> bool:
     pandas DataFrame, no existing-file read. Returns True on success.
     """
     try:
-        table = pa.Table.from_pylist(rows)
+        # DATA-LOSS FIX. pa.Table.from_pylist() takes its top-level columns from the
+        # FIRST row only. "Unchanged" marker documents have no book_odds, so any batch
+        # that happened to START with a marker was written with no book_odds column at
+        # all: every real snapshot in it lost its odds, the row count still matched,
+        # verification passed, and the originals were then deleted from MongoDB.
+        # Build the column list from ALL rows instead.
+        names = []
+        seen = set()
+        for r in rows:
+            for k in r:
+                if k not in seen:
+                    seen.add(k)
+                    names.append(k)
+        table = pa.Table.from_pydict({n: [r.get(n) for r in rows] for n in names})
         pq.write_table(table, path, compression=DAILY_ARCHIVE_COMPRESSION)
         return True
     except Exception as e:
@@ -113,7 +126,7 @@ def _write_batch_parquet(rows: list, path: str) -> bool:
         return False
 
 
-def _verify_batch_parquet(path: str, expected_rows: int) -> bool:
+def _verify_batch_parquet(path: str, expected_rows: int, expected_odds_rows: int = 0) -> bool:
     """
     Verify row count via PyArrow file metadata — does NOT load any column
     data into memory, just reads the footer's row-group statistics.
@@ -129,6 +142,22 @@ def _verify_batch_parquet(path: str, expected_rows: int) -> bool:
     if actual != expected_rows:
         logger.error(f"Verify failed — {path} has {actual} rows, expected {expected_rows}")
         return False
+    if expected_odds_rows:
+        # A matching row COUNT proved nothing about content: the old writer could drop
+        # the whole book_odds column and still pass. Check the odds actually survived.
+        try:
+            names = pq.ParquetFile(path).schema_arrow.names
+            if "book_odds" not in names:
+                stored = 0
+            else:
+                col = pq.read_table(path, columns=["book_odds"]).column("book_odds")
+                stored = len(col) - col.null_count
+        except Exception as e:
+            logger.error(f"Verify failed — could not inspect book_odds in {path}: {e}")
+            return False
+        if stored != expected_odds_rows:
+            logger.error(f"Verify failed — {path} stored odds for {stored} snapshots, expected {expected_odds_rows}")
+            return False
     return True
 
 
@@ -252,7 +281,7 @@ def archive_snapshots():
                 logger.error(f"Skipping {date_key} batch {file_idx} — write failed")
                 continue
 
-            if not _verify_batch_parquet(path, len(rows)):
+            if not _verify_batch_parquet(path, len(rows), expected_odds_rows=sum(1 for r in rows if r.get("book_odds"))):
                 logger.error(f"Skipping {date_key} batch {file_idx} — verify failed")
                 try:
                     os.remove(path)
