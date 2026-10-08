@@ -316,8 +316,17 @@ def detect_line_movement(prev: dict | None, event_id: str, sport: str, book_odds
                     "minutes_to_game": None,
                     "timestamp":       now,
                     "seconds_since_prev": (
-                        now - prev["fetched_at"]
-                    ).total_seconds() if "fetched_at" in prev else None,
+                        (
+                            now
+                            - (
+                                prev["fetched_at"].replace(tzinfo=timezone.utc)
+                                if prev["fetched_at"].tzinfo is None
+                                else prev["fetched_at"].astimezone(timezone.utc)
+                            )
+                        ).total_seconds()
+                        if "fetched_at" in prev and prev["fetched_at"] is not None
+                        else None
+                    ),
                 }
                 movements.append(movement)
 
