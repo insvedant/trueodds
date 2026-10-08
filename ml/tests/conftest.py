@@ -34,6 +34,13 @@ def isolated_models(tmp_path, monkeypatch):
         if hasattr(mod, "MODEL_DIR"):
             monkeypatch.setattr(mod, "MODEL_DIR", str(models))
     monkeypatch.setattr(T, "MongoClient", mongomock.MongoClient)
+    # Never read the real archive (on the server it is /home/ubuntu/data_archive).
+    import ml.parquet_loader as PL
+    empty = tmp_path / "empty_archive"
+    empty.mkdir()
+    for mod in (cfg, PL):
+        monkeypatch.setattr(mod, "ARCHIVE_DIR", str(empty), raising=False)
+        monkeypatch.setattr(mod, "LEGACY_ARCHIVE_DIR", str(empty), raising=False)
     return models
 
 
