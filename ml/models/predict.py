@@ -68,12 +68,17 @@ def predict_clv(features: dict) -> dict:
         logger.error(f"CLV prediction error: {e}")
         return {"available": False, "reason": str(e)}
 
+    # pred = expected closing average DECIMAL odds minus current average decimal
+    # odds (that is how the training label is built). A positive number means the
+    # price is expected to LENGTHEN, i.e. pay more, so waiting is better. These
+    # two branches were the wrong way round, telling users to bet now exactly when
+    # the model expected a better price later.
     if pred > 0.05:
+        direction = "better"     # odds will drift out (more valuable)
+        advice    = "Wait — odds may improve"
+    elif pred < -0.05:
         direction = "worse"      # odds will shorten (less valuable)
         advice    = "Bet now — odds likely to get worse"
-    elif pred < -0.05:
-        direction = "better"     # odds will drift (more valuable)
-        advice    = "Wait — odds may improve"
     else:
         direction = "stable"
         advice    = "Odds likely stable — bet when ready"
@@ -110,6 +115,12 @@ def predict_sharp_money(features: dict) -> dict:
     }
 
     X = pd.DataFrame([sharp_features]).fillna(0)
+
+    # Line up with the columns the model was trained on (as predict_clv does), so a
+    # change to the training features can't turn into a silent prediction error.
+    trained_cols = getattr(model, "feature_names_in_", None)
+    if trained_cols is not None:
+        X = X.reindex(columns=list(trained_cols), fill_value=0)
 
     try:
         prob     = float(model.predict_proba(X)[0][1])
