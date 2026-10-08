@@ -272,14 +272,14 @@ def _iter_batches(cursor, size: int):
         yield batch
 
 
-def archive_line_movements() -> dict:
+def archive_line_movements(retention: timedelta | None = None) -> dict:
     """
     Archive line_movements older than LIVE_RETENTION_DAYS to Parquet, then delete them from Mongo.
     Same safety rule as snapshots: a batch is deleted from Mongo only after its file is written and
     verified. (Their schema differs from odds_snapshots, hence the separate directory.)
     """
     db = get_db()
-    cutoff = datetime.now(timezone.utc) - timedelta(days=LIVE_RETENTION_DAYS)
+    cutoff = datetime.now(timezone.utc) - (retention if retention is not None else timedelta(days=LIVE_RETENTION_DAYS))
     collection = db[COL_LINE_MOVEMENTS]
     logger.info(f"Archiving line_movements older than {cutoff.isoformat()} in batches of {BATCH_SIZE}")
 
@@ -338,10 +338,20 @@ def archive_line_movements() -> dict:
     return {"archived": total_archived, "partitions": len(partition_dates)}
 
 
-def archive_snapshots():
+def archive_snapshots(retention: timedelta | None = None):
+    """Archive snapshots older than `retention` (default LIVE_RETENTION_DAYS) to Parquet, then delete them from Mongo."""
     db = get_db()
     seed_total_snapshots_if_missing(db)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=LIVE_RETENTION_DAYS)
+    cutoff = datetime.now(timezone.utc) - (retention if retention is not None else timedelta(days=LIVE_RETENTION_DAYS))
+
+    # A recent "unchanged" marker points at the real snapshot it repeats, and that real snapshot can be
+    # older than the cutoff (the odds simply haven't moved). Deleting it would leave live markers pointing
+    # at nothing and break feature building for those events, so anything a recent marker still
+    # references stays in Mongo until the event has really moved on.
+    pinned = db[COL_ODDS_SNAPSHOTS].distinct("duplicate_of", {"is_duplicate": True, "fetched_at": {"$gte": cutoff}})
+    eligible_query = {"fetched_at": {"$lt": cutoff}}
+    if pinned:
+        eligible_query["_id"] = {"$nin": pinned}
 
     logger.info(
         f"Archiving odds_snapshots older than {cutoff.isoformat()} "
@@ -350,7 +360,7 @@ def archive_snapshots():
 
     # count_documents is a cheap server-side aggregation — no documents
     # are transferred to Python just to get this number.
-    eligible = db[COL_ODDS_SNAPSHOTS].count_documents({"fetched_at": {"$lt": cutoff}})
+    eligible = db[COL_ODDS_SNAPSHOTS].count_documents(eligible_query)
     if eligible == 0:
         logger.info("Nothing to archive — no documents older than the retention window.")
         update_stats(db, archived_delta=0)
@@ -361,9 +371,7 @@ def archive_snapshots():
     # batch_size() controls how many documents MongoDB sends to Python per
     # network round-trip — the cursor itself is lazy and holds no more than
     # batch_size documents in RAM at a time.
-    cursor = db[COL_ODDS_SNAPSHOTS].find(
-        {"fetched_at": {"$lt": cutoff}}
-    ).batch_size(BATCH_SIZE)
+    cursor = db[COL_ODDS_SNAPSHOTS].find(eligible_query).batch_size(BATCH_SIZE)
 
     total_archived  = 0
     partition_dates: set = set()
