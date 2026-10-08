@@ -104,3 +104,55 @@ def test_archival_waits_for_training_instead_of_running_beside_it(monkeypatch):
         await asyncio.gather(t, R.job_archive_snapshots())
     run(both())
     assert order == ["train-start", "train-end", "archive"]
+
+
+class TestFrequentJobsStayOffTheEventLoop:
+    """Collection and predictions used to block the loop for minutes, so the other job was skipped."""
+
+    def _worst_gap_while(self, coro_factory):
+        async def scenario():
+            ticks = []
+            async def ticker():
+                while True:
+                    ticks.append(time.time()); await asyncio.sleep(0.05)
+            t = asyncio.create_task(ticker())
+            await coro_factory()
+            t.cancel()
+            return max(b - a for a, b in zip(ticks, ticks[1:]))
+        return run(scenario())
+
+    def test_a_blocking_prediction_run_does_not_freeze_the_scheduler(self, monkeypatch):
+        import ml.models.predict as P
+        monkeypatch.setattr(P, "generate_all_predictions", lambda: time.sleep(1.0) or 7)
+        assert self._worst_gap_while(R.job_generate_predictions) < 0.4
+
+    def test_a_blocking_collection_run_does_not_freeze_the_scheduler(self, monkeypatch):
+        import ml.collect_data as C
+        async def slow_collect():
+            time.sleep(1.0)                                   # blocking work inside an async function, like the real one
+            return {"games": 1}
+        monkeypatch.setattr(C, "collect_snapshot", slow_collect)
+        assert self._worst_gap_while(R.job_collect_data) < 0.4
+
+    def test_frequent_jobs_have_a_catch_up_window_and_never_overlap_themselves(self):
+        src = open(R.__file__, encoding="utf-8").read()
+        assert src.count("misfire_grace_time=FREQUENT_MISFIRE_GRACE_SECONDS") == 2
+        for job_id in ("collect_data", "generate_predictions"):
+            block = src[src.index(f'id="{job_id}"'):].split("scheduler.add_job")[0]
+            assert "max_instances=1" in block and "coalesce=True" in block
+
+    def test_training_runs_at_the_configured_quiet_hour(self):
+        src = open(R.__file__, encoding="utf-8").read()
+        assert "CronTrigger(hour=TRAIN_HOUR_UTC, minute=0)" in src and R.TRAIN_HOUR_UTC == 8
+
+
+@pytest.mark.skipif(not __import__("shutil").which("nice"), reason="nice not available")
+def test_training_runs_at_lower_cpu_priority(monkeypatch):
+    seen = {}
+    async def fake(cmd, cwd, timeout, tag="[TRAIN]"):
+        seen["cmd"] = cmd
+        return {"returncode": 0, "timed_out": False, "tail": []}
+    monkeypatch.setattr(R, "run_logged_subprocess", fake)
+    R._heavy_lock = None
+    run(R.job_train_models())
+    assert seen["cmd"][1:3] == ["-n", "10"] and seen["cmd"][-3:][1:] == ["-m", "ml.models.train"]
