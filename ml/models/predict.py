@@ -29,7 +29,7 @@ from ml.features import (
     minutes_to_game,
 )
 from ml.models.train import load_model
-from ml.features import parse_utc
+from ml.features import parse_utc, clv_market_rows, CLV_FEATURE_COLUMNS, decimal_to_american
 
 # Events whose odds haven't changed are re-predicted at most this often (the only thing that drifts
 # for them is the time left before the game).
@@ -71,54 +71,69 @@ def get_feature_row(features: dict) -> pd.DataFrame:
     return pd.DataFrame([row]).fillna(0)
 
 
+CLV_MOVE_THRESHOLD = 0.01        # a 1% change in decimal odds before kickoff counts as a real move
+
+
+def _american_str(price) -> str:
+    price = int(round(price))
+    return f"+{price}" if price > 0 else str(price)
+
+
 def predict_clv(features: dict) -> dict:
     """
-    Predict closing line value.
-    Returns: { value: float, direction: 'better'|'worse'|'stable', confidence: float }
+    Will the best soft-book price in this game move toward or away from the sharp line before kickoff?
+
+    Scores every soft-book price (see features.clv_market_rows) and reports the one a bettor would
+    target: the highest value against the sharp books' fair price. `value` is the predicted change in
+    that price relative to the fair price. If the sharp line is fair, betting now is worth today's edge,
+    and waiting only pays when the edge is expected to GROW: negative = the edge is expected to shrink as
+    the soft book catches up (bet now), positive = it is expected to grow (waiting is better). It says
+    nothing about news that moves the sharp line itself, which nobody can predict.
     """
     payload = _cached_load(MODEL_CLV)
     if not payload:
         return {"available": False, "reason": "model_not_trained"}
-
+    meta = payload.get("metadata") or {}
+    if meta.get("target") != "soft_price_relative_shift":
+        # A model saved by the earlier version predicted something different (and leaked its own
+        # answer). Serving its output as advice would be misleading, so it is refused until retrained.
+        return {"available": False, "reason": "model_outdated"}
     model = payload["model"]
-    X     = get_feature_row(features)
 
-    # Align columns with training features. Missing columns are added in ONE concat (adding them
-    # one at a time fragments the DataFrame); this was fixed on the server and is kept here.
-    trained_cols = getattr(model, "feature_names_in_", None)
-    if trained_cols is not None:
-        missing_cols = [col for col in trained_cols if col not in X.columns]
-        if missing_cols:
-            X = pd.concat([X, pd.DataFrame(0, index=X.index, columns=missing_cols)], axis=1)
-        X = X.reindex(columns=trained_cols, fill_value=0)
-
+    rows = clv_market_rows(features.get("_h2h"), features.get("minutes_to_game"))
+    if not rows:
+        return {"available": False, "reason": "no_comparable_prices"}
+    X = pd.DataFrame(rows)[meta.get("features") or CLV_FEATURE_COLUMNS]
     try:
-        pred = float(model.predict(X)[0])
+        preds = np.asarray(model.predict(X), dtype=float)
     except Exception as e:
         logger.error(f"CLV prediction error: {e}")
         return {"available": False, "reason": str(e)}
 
-    # pred = expected closing average DECIMAL odds minus current average decimal
-    # odds (that is how the training label is built). A positive number means the
-    # price is expected to LENGTHEN, i.e. pay more, so waiting is better. These
-    # two branches were the wrong way round, telling users to bet now exactly when
-    # the model expected a better price later.
-    if pred > 0.05:
-        direction = "better"     # odds will drift out (more valuable)
-        advice    = "Wait — odds may improve"
-    elif pred < -0.05:
-        direction = "worse"      # odds will shorten (less valuable)
-        advice    = "Bet now — odds likely to get worse"
+    best = int(np.argmax([r["value_vs_fair"] for r in rows]))
+    row, pred = rows[best], float(preds[best])
+    if pred > CLV_MOVE_THRESHOLD:
+        direction, advice = "better", "Wait — this price may become more attractive"
+        outlook = f"expected to improve by about {abs(pred) * 100:.1f}% relative to the sharp line"
+    elif pred < -CLV_MOVE_THRESHOLD:
+        direction, advice = "worse", "Bet now — this price is likely to move toward the sharp line"
+        outlook = f"expected to move about {abs(pred) * 100:.1f}% toward the sharp line"
     else:
-        direction = "stable"
-        advice    = "Odds likely stable — bet when ready"
-
+        direction, advice = "stable", "Price likely stable — bet when ready"
+        outlook = "expected to hold its value relative to the sharp line"
+    ev_pct = row["value_vs_fair"] * 100
     return {
-        "available":    True,
-        "value":        round(pred, 4),
-        "direction":    direction,
-        "advice":       advice,
-        "confidence":   min(1.0, abs(pred) * 10),
+        "available":  True,
+        "value":      round(pred, 4),
+        "direction":  direction,
+        "advice":     advice,
+        "confidence": min(1.0, abs(pred) / (5 * CLV_MOVE_THRESHOLD)),
+        "best_book":  row["_book"],
+        "selection":  row["_selection"],
+        "book_odds":  _american_str(row["_american"]),
+        "fair_odds":  _american_str(decimal_to_american(1.0 / row["fair_prob"])),
+        "ev_pct":     round(ev_pct, 2),
+        "reason":     f"{row['_book']} on {row['_selection']} is {ev_pct:+.1f}% vs the sharp books' fair price; {outlook}.",
     }
 
 
