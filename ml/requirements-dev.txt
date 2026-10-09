@@ -1,0 +1,4 @@
+# Test-only dependencies (not needed on the server):  pip install -r ml/requirements-dev.txt
+-r requirements.txt
+pytest>=7
+mongomock>=4.1
