@@ -280,6 +280,84 @@ def build_event_level_features(book_odds: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------------------------
+# CLV: "will THIS soft-book price move toward the sharp price before kickoff?"
+#
+# The first CLV model predicted one number per game: the change in average decimal odds across BOTH
+# sides of the market. The two sides move in opposite directions, so that number largely cancels,
+# and the features (symmetric summaries, some of them absolute values) could not say which side
+# would move anyway. It could never beat guessing. This formulation is per price instead:
+# one row per (selection, soft book), with the gap to the sharp books' no-vig price as the key feature.
+# Soft books lag the sharp line, so a price above fair value tends to shorten and one below tends
+# to lengthen. Training and live prediction both build their rows with clv_market_rows(), so they
+# cannot drift apart.
+# ---------------------------------------------------------------------------------------------
+CLV_FEATURE_COLUMNS = [
+    "fair_prob", "soft_prob", "gap", "value_vs_fair", "consensus_gap", "is_favorite",
+    "n_selections", "n_books", "sharp_vig", "has_sharp", "minutes_to_game",
+]
+CLV_LABEL_CLIP = 0.25      # a single quote that is 25%+ off is a stale/erroneous price, not a market move
+
+
+def decimal_to_american(decimal_odds: float) -> int:
+    if decimal_odds >= 2.0:
+        return int(round((decimal_odds - 1.0) * 100))
+    return int(round(-100.0 / max(decimal_odds - 1.0, 1e-9)))
+
+
+def clv_market_rows(h2h: dict, minutes_to_game: float) -> list:
+    """
+    One dict per (selection, soft book): CLV_FEATURE_COLUMNS plus private _selection/_book/_american/_decimal.
+    `fair_prob` is the sharp books' no-vig probability (the average over sharp books that price every
+    selection). With no such sharp book it falls back to the consensus of all books that do, and
+    `has_sharp` is 0. Returns [] when the market can't be de-vigged.
+    """
+    h2h = clean_h2h(h2h)
+    selections = list(h2h)
+    if len(selections) < 2:
+        return []
+    books = set().union(*[set(h2h[sel]) for sel in selections])
+    full = [b for b in books if all(b in h2h[sel] for sel in selections)]
+    sharp_full = [b for b in full if b in SHARP_BOOKS]
+    reference = sharp_full or full
+    if not reference:
+        return []
+
+    fair = {sel: 0.0 for sel in selections}
+    vigs = []
+    for book in reference:
+        raw = {sel: 1.0 / american_to_decimal(h2h[sel][book]) for sel in selections}
+        total = sum(raw.values())
+        vigs.append(total - 1.0)
+        for sel in selections:
+            fair[sel] += raw[sel] / total
+    fair = {sel: value / len(reference) for sel, value in fair.items()}
+    sharp_vig = float(np.mean(vigs))
+    has_sharp = int(bool(sharp_full))
+
+    rows = []
+    for sel in selections:
+        soft = {b: 1.0 / american_to_decimal(price) for b, price in h2h[sel].items() if b not in SHARP_BOOKS}
+        mean_soft = float(np.mean(list(soft.values()))) if soft else 0.0
+        for book, soft_prob in soft.items():
+            decimal = 1.0 / soft_prob
+            rows.append({
+                "fair_prob":     fair[sel],
+                "soft_prob":     soft_prob,
+                "gap":           soft_prob - fair[sel],                  # negative = the soft book pays MORE than fair
+                "value_vs_fair": fair[sel] * decimal - 1.0,              # expected profit per unit staked at this price
+                "consensus_gap": soft_prob - mean_soft,                  # this book against the other soft books
+                "is_favorite":   int(fair[sel] > 0.5),
+                "n_selections":  len(selections),
+                "n_books":       len(h2h[sel]),
+                "sharp_vig":     sharp_vig,
+                "has_sharp":     has_sharp,
+                "minutes_to_game": float(minutes_to_game or 0.0),
+                "_selection": sel, "_book": book, "_american": h2h[sel][book], "_decimal": decimal,
+            })
+    return rows
+
+
 def minutes_to_game(commence_time: str) -> float:
     """Calculate minutes until game starts."""
     try:
@@ -332,6 +410,7 @@ def build_features_for_event(event_id: str, db) -> dict | None:
 
     
     features.update(build_cross_book_features(book_odds))
+    features["_h2h"] = clean_h2h(book_odds.get("h2h"))      # the raw prices, for predict_clv (non-numeric: ignored by get_feature_row)
 
     
     features.update(build_line_movement_features(event_id, db))
@@ -402,7 +481,7 @@ def build_training_dataset(db, min_samples: int = 100) -> pd.DataFrame:
     df = pd.DataFrame(rows)
 
     
-    drop_cols = ["event_id", "sport", "home", "away", "computed_at"]
+    drop_cols = ["event_id", "sport", "home", "away", "computed_at", "_h2h"]
     df = df.drop(columns=[c for c in drop_cols if c in df.columns])
 
     
