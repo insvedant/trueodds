@@ -18,6 +18,7 @@ Models:
 """
 
 import os
+import random
 import gc
 import time
 import joblib
@@ -40,6 +41,7 @@ from ml.config import (
 )
 from ml.features import (
     build_features_for_event, american_to_decimal, build_cross_book_features, minutes_to_game,
+    clv_market_rows, CLV_FEATURE_COLUMNS, CLV_LABEL_CLIP,
     build_event_level_features, clean_h2h, parse_utc,
 )
 from ml.parquet_loader import load_historical_parquet, iter_h2h_snapshots, iter_line_movements, iter_observations, new_stream_stats
@@ -215,25 +217,6 @@ CLV_MIN_SPAN_MINUTES = 60         # a game must have been watched for at least t
 CLV_LEAD_MINUTES     = (2880, 1440, 360, 60)
 
 
-def _avg_decimal_shift(from_h2h: dict, to_h2h: dict):
-    """
-    Change in average decimal odds from one snapshot to another, averaged over
-    selections, using only books that quote both. None if nothing is comparable.
-    """
-    shifts = []
-    for selection, from_books in from_h2h.items():
-        to_books = to_h2h.get(selection)
-        if not to_books:
-            continue
-        common = set(from_books) & set(to_books)
-        if not common:
-            continue
-        start = np.mean([american_to_decimal(from_books[b]) for b in common])
-        end = np.mean([american_to_decimal(to_books[b]) for b in common])
-        shifts.append(end - start)
-    return float(np.mean(shifts)) if shifts else None
-
-
 class _ClvEventAccumulator:
     """
     Builds a small per-event summary from streams of documents from BOTH stores (Mongo and Parquet),
@@ -290,8 +273,11 @@ class _ClvEventAccumulator:
                 if cur is None or ts > cur[0]:
                     ev["asof"][lead] = (ts, h2h)
 
-    def samples(self, now, funnel: dict):
-        """Yield (features, label, event_id) and fill in the funnel counters."""
+    def slices(self, now, funnel: dict):
+        """
+        Yield (event_id, lead_minutes, state_h2h, close_h2h): the market as it stood `lead` minutes
+        before kickoff, and its closing line. Fills in the not-started / too-short counters.
+        """
         for event_id, ev in self.events.items():
             funnel["events_seen"] += 1
             commence = ev["commence"]
@@ -310,17 +296,46 @@ class _ClvEventAccumulator:
                     continue
                 if ev["last_obs"] < commence - timedelta(minutes=lead):    # tracking had already stopped by then
                     continue
-                label = _avg_decimal_shift(state[1], close[1])
-                if label is None:
-                    continue
-                feats = build_event_level_features({"h2h": state[1]})
-                feats["minutes_to_game"] = float(lead)
                 made += 1
-                yield feats, label, event_id
-            if made:
-                funnel["events_used"] += 1
-            else:
+                yield event_id, lead, state[1], close[1]
+            if not made:
                 funnel["events_no_usable_slice"] += 1
+
+
+CLV_CALL_THRESHOLD = 0.01     # a predicted move of 1%+ is a "call" (matches predict.CLV_MOVE_THRESHOLD)
+CLV_ROWS_PER_SLICE = 6        # prices sampled per (game, lead time): keeps one busy game from dominating
+
+
+def label_clv_rows(state_h2h: dict, close_h2h: dict, lead: float) -> list:
+    """
+    (features, net_label, absolute_label) for every soft-book price in the market `lead` minutes out
+    that is still quoted at the close.
+
+      absolute = closing decimal odds / decimal odds then - 1      (what a bettor experiences)
+      net      = absolute - the same move of the sharp books' FAIR price
+
+    Most of a price's move to kickoff is the sharp line itself moving on new information, which no model
+    can predict and which swamps the part that is predictable: the soft price catching up with the sharp
+    one. The fair price's drift averages zero, so the expected absolute move equals the expected net
+    move; training on the net label learns the same thing with far less noise. The absolute label is kept
+    so the model is also judged on what users will actually see.
+    """
+    close = clean_h2h(close_h2h)
+    fair_at_close = {}
+    for r in clv_market_rows(close_h2h, 0.0):
+        fair_at_close[r["_selection"]] = r["fair_prob"]
+    out = []
+    for row in clv_market_rows(state_h2h, lead):
+        closing_price = close.get(row["_selection"], {}).get(row["_book"])
+        fair_close = fair_at_close.get(row["_selection"])
+        if closing_price is None or not fair_close:
+            continue
+        absolute = american_to_decimal(closing_price) / row["_decimal"] - 1.0
+        fair_move = row["fair_prob"] / fair_close - 1.0              # relative change in the fair DECIMAL odds
+        out.append(({k: row[k] for k in CLV_FEATURE_COLUMNS},
+                    float(np.clip(absolute - fair_move, -CLV_LABEL_CLIP, CLV_LABEL_CLIP)),
+                    float(np.clip(absolute, -CLV_LABEL_CLIP, CLV_LABEL_CLIP))))
+    return out
 
 
 def build_clv_dataset(db):
@@ -363,18 +378,30 @@ def build_clv_dataset(db):
 
     funnel = {"events_seen": 0, "events_not_started": 0, "events_too_short": 0,
               "events_no_usable_slice": 0, "events_used": 0}
-    X_rows, y_vals, groups = [], [], []
-    for feats, label, event_id in acc.samples(now, funnel):
-        X_rows.append(feats)
-        y_vals.append(label)
-        groups.append(event_id)
+    rows, labels, abs_labels, groups = [], [], [], []
+    rows_per_event, sliced_without_rows = {}, set()
+    for event_id, lead, state, close in acc.slices(now, funnel):
+        labelled = label_clv_rows(state, close, lead)
+        if len(labelled) > CLV_ROWS_PER_SLICE:
+            labelled = random.Random(f"{event_id}:{lead}").sample(labelled, CLV_ROWS_PER_SLICE)
+        for features, net_label, abs_label in labelled:
+            rows.append(features)
+            labels.append(net_label)
+            abs_labels.append(abs_label)
+            groups.append(event_id)
+        if labelled:
+            rows_per_event[event_id] = rows_per_event.get(event_id, 0) + len(labelled)
+        else:
+            sliced_without_rows.add(event_id)
+    funnel["events_used"] = len(rows_per_event)
+    funnel["events_no_usable_slice"] += len(sliced_without_rows - set(rows_per_event))
 
     info = {
         "window_days": CLV_ROLLING_DAYS,
         "mongo_snapshots": mongo_rows,
         "parquet": pq_stats,
         **funnel,
-        "samples": len(X_rows),
+        "samples": len(rows),
         "needed_samples": MIN_TRAINING_ROWS,
         "needed_events": CLV_MIN_EVENTS,
     }
@@ -387,19 +414,20 @@ def build_clv_dataset(db):
         f"→ {funnel['events_seen']:,} events: {funnel['events_not_started']:,} not started yet, "
         f"{funnel['events_too_short']:,} watched < {CLV_MIN_SPAN_MINUTES} min, "
         f"{funnel['events_no_usable_slice']:,} with no comparable prices, "
-        f"{funnel['events_used']:,} usable → {len(X_rows):,} samples"
+        f"{funnel['events_used']:,} usable → {len(rows):,} price samples"
     )
 
-    if len(X_rows) < MIN_TRAINING_ROWS or funnel["events_used"] < CLV_MIN_EVENTS:
+    if len(rows) < MIN_TRAINING_ROWS or funnel["events_used"] < CLV_MIN_EVENTS:
         logger.warning(
-            f"CLV: {len(X_rows):,} samples from {funnel['events_used']:,} events "
+            f"CLV: {len(rows):,} samples from {funnel['events_used']:,} events "
             f"(need {MIN_TRAINING_ROWS:,} samples from at least {CLV_MIN_EVENTS} events)"
         )
         return None, None, None, info
 
-    X = pd.DataFrame(X_rows).fillna(0)
+    X = pd.DataFrame(rows, columns=CLV_FEATURE_COLUMNS).fillna(0)
     logger.info(f"CLV dataset: {len(X):,} rows from {funnel['events_used']:,} events, {len(X.columns)} features")
-    return X, pd.Series(y_vals, dtype=float), pd.Series(groups), info
+    info["_y_abs"] = abs_labels          # the move users experience; consumed by train_clv_model
+    return X, pd.Series(labels, dtype=float), pd.Series(groups), info
 
 
 def train_clv_model(db) -> dict:
@@ -415,10 +443,12 @@ def train_clv_model(db) -> dict:
             "funnel": info,
         }
 
+    y_abs = pd.Series(info.pop("_y_abs"), dtype=float)
     if len(X) > MAX_SAMPLES:
         logger.info(f"CLV: sampling {len(X):,} rows down to {MAX_SAMPLES:,}")
         keep = np.random.RandomState(RANDOM_STATE).choice(len(X), MAX_SAMPLES, replace=False)
         X, y, groups = X.iloc[keep].reset_index(drop=True), y.iloc[keep].reset_index(drop=True), groups.iloc[keep].reset_index(drop=True)
+        y_abs = y_abs.iloc[keep].reset_index(drop=True)
 
     # Several samples come from the same game, so the held-out set must contain
     # whole games; a random row split would let the model "see" a test game's
@@ -428,6 +458,7 @@ def train_clv_model(db) -> dict:
     y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
     model = xgb.XGBRegressor(
+        objective="reg:absoluteerror",      # judged on MAE against a median baseline, so optimise MAE
         n_estimators=N_ESTIMATORS_LARGE,
         max_depth=5,
         learning_rate=0.05,
@@ -439,28 +470,50 @@ def train_clv_model(db) -> dict:
     )
     model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
 
-    mae = float(mean_absolute_error(y_test, model.predict(X_test)))
+    test_preds = np.asarray(model.predict(X_test), dtype=float)
+    mae = float(mean_absolute_error(y_test, test_preds))
     # What you'd score by ignoring the features and always guessing the typical move.
     baseline_mae = float(mean_absolute_error(y_test, np.full(len(y_test), float(np.median(y_train)))))
     fi = dict(zip(X.columns, model.feature_importances_))
     top = sorted(fi.items(), key=lambda x: x[1], reverse=True)[:10]
     n_events = int(groups.nunique())
 
-    if mae >= baseline_mae and not ALLOW_WEAK_MODELS:
-        detail = (f"Held-out MAE {mae:.4f} is not better than simply guessing the typical move ({baseline_mae:.4f}) across "
-                  f"{len(X):,} samples from {n_events:,} games, so there is no usable signal in these features yet. "
-                  "The previously saved model (if any) was left in place.")
+    # "Bet now or wait" is about whether the price moves toward or away from the sharp line (the edge
+    # shrinking or growing), which is exactly what the net label measures. Calls are judged on that.
+    # The raw price move is also reported: it is dominated by the sharp line's own moves on new
+    # information, which nobody can predict, so it is informational and does not gate the model.
+    called = np.abs(test_preds) >= CLV_CALL_THRESHOLD
+    n_calls = int(called.sum())
+    net_test, abs_test = y.iloc[test_idx].to_numpy(), y_abs.iloc[test_idx].to_numpy()
+    hit_rate = float((np.sign(test_preds[called]) == np.sign(net_test[called])).mean()) if n_calls else None
+    moved = called & (abs_test != 0)
+    raw_hit_rate = float((np.sign(test_preds[moved]) == np.sign(abs_test[moved])).mean()) if moved.any() else None
+    beats_baseline = mae < baseline_mae
+    calls_ok = n_calls < 50 or (hit_rate is not None and hit_rate > 0.5)
+    if not (beats_baseline and calls_ok) and not ALLOW_WEAK_MODELS:
+        why = (f"Held-out MAE {mae:.4f} is not better than simply guessing the typical move ({baseline_mae:.4f})" if not beats_baseline
+               else f"its calls on whether a price will move toward or away from the sharp line were right only {hit_rate:.0%} of the time over {n_calls:,} held-out calls (a coin flip is 50%)")
+        detail = (f"{why}, across {len(X):,} price samples from {n_events:,} games, so there is no usable signal in these "
+                  "features yet. The previously saved model (if any) was left in place.")
         logger.warning(f"CLV NOT saved: {detail}")
         return {"success": False, "reason": "no_signal", "detail": detail, "mae": mae, "baseline_mae": baseline_mae,
-                "samples": len(X), "events": n_events}
+                "hit_rate": hit_rate, "n_calls": n_calls, "raw_hit_rate": raw_hit_rate, "samples": len(X), "events": n_events}
 
     metadata = {"mae": round(mae, 6), "baseline_mae": round(baseline_mae, 6), "n_samples": len(X), "n_events": n_events,
-                "n_features": len(X.columns), "window_days": CLV_ROLLING_DAYS, "top_features": top}
+                "n_features": len(X.columns), "window_days": CLV_ROLLING_DAYS, "top_features": top,
+                "hit_rate": None if hit_rate is None else round(hit_rate, 4), "n_calls": n_calls,
+                "raw_hit_rate": None if raw_hit_rate is None else round(raw_hit_rate, 4),
+                # predict_clv refuses any saved model without this tag (the old averaged-shift model has none)
+                "target": "soft_price_relative_shift", "features": list(X.columns)}
     save_model(model, MODEL_CLV, metadata)
     verdict = "beats" if mae < baseline_mae else "does NOT beat"
-    logger.success(f"CLV trained — MAE: {mae:.6f} ({verdict} the always-guess-the-median baseline of {baseline_mae:.6f}), "
-                   f"{len(X):,} samples from {n_events:,} games")
-    return {"success": True, "mae": mae, "baseline_mae": baseline_mae, "samples": len(X), "events": n_events}
+    shown_hit = ("no calls made" if hit_rate is None else
+                 f"toward/away-from-sharp calls right {hit_rate:.0%} of {n_calls:,}"
+                 + ("" if raw_hit_rate is None else f" (raw price direction {raw_hit_rate:.0%}, dominated by unpredictable sharp-line moves)"))
+    logger.success(f"CLV trained — MAE: {mae:.6f} ({verdict} the always-guess-the-median baseline of {baseline_mae:.6f}); "
+                   f"{shown_hit}; {len(X):,} price samples from {n_events:,} games")
+    return {"success": True, "mae": mae, "baseline_mae": baseline_mae, "hit_rate": hit_rate, "n_calls": n_calls,
+            "raw_hit_rate": raw_hit_rate, "samples": len(X), "events": n_events}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
