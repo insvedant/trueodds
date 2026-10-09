@@ -14,7 +14,8 @@ def clv_dataset(signal: bool, n_events=60, per_event=4, seed=0):
     X = pd.DataFrame({"minutes_to_game": rng.uniform(10, 4000, n), "avg_odds_spread": rng.uniform(0, 1, n), "vig_estimate": rng.uniform(0, 0.1, n)})
     y = pd.Series((X["avg_odds_spread"] * 0.8 - 0.4 + rng.normal(0, 0.02, n)) if signal else rng.normal(0, 0.2, n))
     groups = pd.Series(np.repeat([f"e{i}" for i in range(n_events)], per_event))
-    info = {"samples": n, "events_used": n_events, "window_days": 90, "needed_samples": 1, "needed_events": 1}
+    info = {"samples": n, "events_used": n_events, "window_days": 90, "needed_samples": 1, "needed_events": 1,
+            "_y_abs": list(y.to_numpy() + rng.normal(0, 0.3, n))}          # the raw move: the net move plus unpredictable news
     return X, y, groups, info
 
 
@@ -27,13 +28,23 @@ def test_clv_with_real_signal_beats_the_baseline_and_is_saved(monkeypatch, saved
     monkeypatch.setattr(T, "build_clv_dataset", lambda db: clv_dataset(signal=True))
     r = T.train_clv_model(None)
     assert r["success"] and r["mae"] < r["baseline_mae"] and r["events"] == 60 and saved("clv_predictor")
+    assert r["hit_rate"] > 0.9 and r["n_calls"] > 30 and r["raw_hit_rate"] is not None        # calls about toward/away-from-sharp, plus the raw direction
+
+
+def test_the_saved_clv_model_declares_what_it_predicts_so_the_old_model_can_be_refused(monkeypatch, isolated_models):
+    import joblib
+    monkeypatch.setattr(T, "build_clv_dataset", lambda db: clv_dataset(signal=True))
+    T.train_clv_model(None)
+    meta = joblib.load(os.path.join(str(isolated_models), "clv_predictor.joblib"))["metadata"]
+    assert meta["target"] == "soft_price_relative_shift" and meta["features"] == ["minutes_to_game", "avg_odds_spread", "vig_estimate"]
+    assert meta["hit_rate"] > 0.9 and "raw_hit_rate" in meta
 
 
 def test_clv_with_no_signal_is_not_saved_and_says_so(monkeypatch, saved):
     monkeypatch.setattr(T, "build_clv_dataset", lambda db: clv_dataset(signal=False))
     r = T.train_clv_model(None)
     assert r["success"] is False and r["reason"] == "no_signal" and "not better than simply guessing" in r["detail"]
-    assert not saved("clv_predictor")                                    # a useless model must not replace a working one
+    assert not saved("clv_predictor") and "hit_rate" in r                                    # a useless model must not replace a working one
 
 
 def test_the_gate_can_be_overridden(monkeypatch, saved):
