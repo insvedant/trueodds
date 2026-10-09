@@ -6,27 +6,94 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 import ml.models.predict as P
 
 
-class FakeClv:
-    def __init__(self, value): self.value = value
-    def predict(self, X): return np.array([self.value])
+from ml.features import CLV_FEATURE_COLUMNS, clv_market_rows
+
+
+class FakeModel:
+    def __init__(self, values):
+        self.values = values
+
+    def predict(self, X):
+        return np.full(len(X), float(self.values)) if np.isscalar(self.values) else np.asarray(self.values, dtype=float)[:len(X)]
+
+
+def clv_payload(model, target="soft_price_relative_shift"):
+    meta = {"features": CLV_FEATURE_COLUMNS}
+    if target:
+        meta["target"] = target
+    return {"model": model, "metadata": meta}
+
+
+# Pinnacle is the 50/50 reference. draftkings Home +105 pays MORE than fair (a +2.5% edge): the best price on offer.
+MARKET = {"Home": {"pinnacle": -110, "draftkings": 105, "fanduel": -115}, "Away": {"pinnacle": -110, "draftkings": -125, "fanduel": -105}}
+
+
+def live(h2h=MARKET):
+    return {"_h2h": h2h, "minutes_to_game": 600.0, "sport": "x", "home": "h", "away": "a"}
 
 
 @pytest.mark.parametrize("pred, direction, advice_start", [
-    (+0.20, "better", "Wait"),        # decimal odds expected to LENGTHEN (pay more) -> waiting is better
-    (-0.20, "worse", "Bet now"),      # decimal odds expected to SHORTEN -> bet now
-    (0.01, "stable", "Odds likely stable"),
+    (-0.03, "worse", "Bet now"),          # the edge is expected to SHRINK as the soft book catches up with the sharp line
+    (+0.03, "better", "Wait"),            # the edge is expected to GROW
+    (0.002, "stable", "Price likely stable"),
 ])
 def test_clv_advice_points_the_right_way(monkeypatch, pred, direction, advice_start):
-    monkeypatch.setattr(P, "load_model", lambda name: {"model": FakeClv(pred)})
-    out = P.predict_clv({"combined_implied_prob": 1.02})
-    assert out["available"] and out["direction"] == direction and out["advice"].startswith(advice_start)
+    monkeypatch.setattr(P, "load_model", lambda name: clv_payload(FakeModel(pred)))
+    out = P.predict_clv(live())
+    assert out["available"] and out["direction"] == direction and out["advice"].startswith(advice_start) and out["value"] == pytest.approx(pred)
 
 
-def test_clv_advice_matches_the_sign_of_the_training_label():
-    """label = closing decimal odds - earlier decimal odds. If the price lengthened, the label is positive and waiting was right."""
-    from ml.features import american_to_decimal
-    earlier, closing = american_to_decimal(-130), american_to_decimal(-110)
-    assert closing - earlier > 0           # -130 -> -110 pays more: price lengthened, label positive
+def test_the_advice_is_about_the_best_value_price_and_carries_what_the_insights_page_shows(monkeypatch):
+    rows = clv_market_rows(MARKET, 600.0)
+    best = max(range(len(rows)), key=lambda i: rows[i]["value_vs_fair"])
+    preds = [0.0] * len(rows)
+    preds[best] = -0.04                                    # only the best price is expected to decay
+    monkeypatch.setattr(P, "load_model", lambda name: clv_payload(FakeModel(preds)))
+    out = P.predict_clv(live())
+    assert (out["best_book"], out["selection"], out["book_odds"], out["fair_odds"]) == ("draftkings", "Home", "+105", "+100")
+    assert out["ev_pct"] == pytest.approx(2.5) and out["direction"] == "worse"
+    assert "draftkings" in out["reason"] and "toward the sharp line" in out["reason"]
+
+
+def test_a_model_saved_by_the_old_version_is_refused_not_used(monkeypatch):
+    """The old model predicted a different quantity (and leaked its own answer): its advice would be misleading."""
+    monkeypatch.setattr(P, "load_model", lambda name: clv_payload(FakeModel(-0.5), target=None))
+    assert P.predict_clv(live()) == {"available": False, "reason": "model_outdated"}
+
+
+def test_clv_is_unavailable_without_a_model_or_without_prices(monkeypatch):
+    monkeypatch.setattr(P, "load_model", lambda name: None)
+    assert P.predict_clv(live())["reason"] == "model_not_trained"
+    monkeypatch.setattr(P, "load_model", lambda name: clv_payload(FakeModel(0.1)))
+    assert P.predict_clv({"minutes_to_game": 60})["reason"] == "no_comparable_prices"
+    assert P.predict_clv(live({"Home": {"pinnacle": -110}}))["reason"] == "no_comparable_prices"
+
+
+def test_a_model_that_raises_is_reported_not_propagated(monkeypatch):
+    class Broken:
+        def predict(self, X): raise ValueError("shape mismatch")
+    monkeypatch.setattr(P, "load_model", lambda name: clv_payload(Broken()))
+    out = P.predict_clv(live())
+    assert out["available"] is False and "shape mismatch" in out["reason"]
+
+
+def test_end_to_end_a_model_trained_where_soft_books_lag_the_sharp_line_says_bet_now_on_a_price_above_fair(world, monkeypatch):
+    """Train on the production-shaped synthetic archive, then ask about two live markets. In this market the soft books
+    follow the sharp line with a delay by construction, so a price above fair should be called as shrinking and one
+    below fair as growing. (This proves the pipeline end to end; it says nothing about your real market.)"""
+    import ml.models.train as T
+    db = world[0]
+    monkeypatch.setattr(T, "MIN_TRAINING_ROWS", 80)
+    monkeypatch.setattr(T, "CLV_MIN_EVENTS", 40)
+    result = T.train_clv_model(db)
+    assert result["success"], result
+    P._MODEL_CACHE.clear()
+    above = {"Home": {"pinnacle": -110, "bookA": 125}, "Away": {"pinnacle": -110, "bookA": -150}}        # bookA pays +8% over fair on Home
+    below = {"Home": {"pinnacle": -110, "bookA": -135}, "Away": {"pinnacle": -110, "bookA": 115}}        # bookA pays well under fair on Home
+    hi, lo = P.predict_clv(live(above)), P.predict_clv(live(below))
+    assert hi["available"] and lo["available"]
+    assert hi["selection"] == "Home" and hi["value"] < 0 and hi["direction"] == "worse"
+    assert lo["value"] > hi["value"]
 
 
 def test_sharp_prediction_survives_a_different_set_of_trained_columns(monkeypatch):
