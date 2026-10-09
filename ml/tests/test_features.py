@@ -2,8 +2,10 @@ from datetime import datetime, timezone, timedelta
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from ml.features import parse_utc, clean_h2h, build_event_level_features, build_cross_book_features
+from ml.features import (parse_utc, clean_h2h, build_event_level_features, build_cross_book_features,
+                         clv_market_rows, decimal_to_american, CLV_FEATURE_COLUMNS)
 
 
 class TestParseUtc:
@@ -67,3 +69,65 @@ class TestEventLevelFeatures:
         live = build_cross_book_features({"h2h": self.H2H})
         for col in build_event_level_features({"h2h": self.H2H}):
             assert col in live
+
+
+class TestClvMarketRows:
+    """Pinnacle -110/-110 is a 50/50 fair price. draftkings quotes +100 on Home and -120 on Away."""
+
+    H2H = {"Home": {"pinnacle": -110, "draftkings": 100}, "Away": {"pinnacle": -110, "draftkings": -120}}
+
+    def rows(self, h2h=None, mtg=600.0):
+        return {(r["_selection"], r["_book"]): r for r in clv_market_rows(h2h or self.H2H, mtg)}
+
+    def test_one_row_per_soft_price_and_the_sharp_book_is_only_the_reference(self):
+        rows = self.rows()
+        assert set(rows) == {("Home", "draftkings"), ("Away", "draftkings")}
+
+    def test_hand_calculated_values(self):
+        rows = self.rows()
+        home, away = rows[("Home", "draftkings")], rows[("Away", "draftkings")]
+        assert home["fair_prob"] == pytest.approx(0.5) and home["soft_prob"] == pytest.approx(0.5)
+        assert home["gap"] == pytest.approx(0.0, abs=1e-12) and home["value_vs_fair"] == pytest.approx(0.0, abs=1e-12)
+        assert away["soft_prob"] == pytest.approx(1 / (1 + 100 / 120)) and away["gap"] == pytest.approx(1 / (1 + 100 / 120) - 0.5)
+        assert away["value_vs_fair"] == pytest.approx(0.5 * (1 + 100 / 120) - 1)           # paying less than fair: a negative edge
+        assert home["sharp_vig"] == pytest.approx(2 / (1 + 100 / 110) - 1) and home["has_sharp"] == 1
+        assert home["n_selections"] == 2 and home["n_books"] == 2 and home["minutes_to_game"] == 600.0
+        assert home["is_favorite"] == 0                                                      # exactly 50% is not a favourite
+
+    def test_every_row_has_exactly_the_documented_columns(self):
+        for r in clv_market_rows(self.H2H, 60):
+            assert [k for k in r if not k.startswith("_")] == CLV_FEATURE_COLUMNS
+
+    def test_a_price_above_fair_has_a_positive_edge_and_a_price_below_it_a_negative_one(self):
+        market = {"Home": {"pinnacle": -110, "bookA": 120, "bookB": -130}, "Away": {"pinnacle": -110, "bookA": -150, "bookB": 110}}
+        rows = self.rows(market)
+        assert rows[("Home", "bookA")]["value_vs_fair"] > 0 > rows[("Home", "bookB")]["value_vs_fair"]
+        assert rows[("Home", "bookA")]["gap"] < 0 < rows[("Home", "bookB")]["gap"]            # gap is in probability: a longer price is a smaller probability
+
+    def test_consensus_gap_compares_a_book_with_the_other_soft_books(self):
+        market = {"Home": {"pinnacle": -110, "bookA": 120, "bookB": -130}, "Away": {"pinnacle": -110, "bookA": -150, "bookB": 110}}
+        rows = self.rows(market)
+        assert rows[("Home", "bookA")]["consensus_gap"] == pytest.approx(-rows[("Home", "bookB")]["consensus_gap"])
+
+    def test_three_way_market_fair_probabilities_sum_to_one(self):
+        market = {"Home": {"pinnacle": 150, "bookA": 160}, "Draw": {"pinnacle": 230, "bookA": 240}, "Away": {"pinnacle": 190, "bookA": 200}}
+        rows = self.rows(market)
+        assert sum(r["fair_prob"] for r in rows.values()) == pytest.approx(1.0) and rows[("Draw", "bookA")]["n_selections"] == 3
+
+    def test_without_a_sharp_book_it_falls_back_to_consensus_and_says_so(self):
+        market = {"Home": {"bookA": -110, "bookB": -105}, "Away": {"bookA": -110, "bookB": -115}}
+        rows = clv_market_rows(market, 60)
+        assert rows and all(r["has_sharp"] == 0 for r in rows) and sum(r["fair_prob"] for r in rows if r["_book"] == "bookA") == pytest.approx(1.0)
+
+    def test_markets_that_cannot_be_de_vigged_give_nothing(self):
+        assert clv_market_rows({"Home": {"pinnacle": -110, "bookA": 100}}, 60) == []                                   # one selection
+        assert clv_market_rows({"Home": {"bookA": -110}, "Away": {"bookB": -110}}, 60) == []                           # no book prices both sides
+        assert clv_market_rows(None, 60) == [] and clv_market_rows({}, 60) == []
+
+    def test_selections_priced_by_a_book_that_does_not_cover_the_whole_market_still_get_rows(self):
+        market = {"Home": {"pinnacle": -110, "bookA": 100, "bookC": 105}, "Away": {"pinnacle": -110, "bookA": -120}}
+        assert ("Home", "bookC") in self.rows(market)
+
+    def test_decimal_to_american_round_trips(self):
+        for american in (-300, -200, -110, 100, 150, 400):
+            assert decimal_to_american(1 + 100 / abs(american) if american < 0 else 1 + american / 100) == american
