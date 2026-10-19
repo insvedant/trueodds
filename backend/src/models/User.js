@@ -27,6 +27,9 @@ const userSchema = new mongoose.Schema({
             status: String,
             date: { type: Date, default: Date.now },
         }],
+    // Set when the person proved they own the email address by entering the code we sent at signup.
+    // Accounts created before email verification existed have null here.
+    emailVerifiedAt: { type: Date, default: null },
     passwordResetToken: { type: String, select: false },
     passwordResetExpires: { type: Date, select: false },
     referralCode: { type: String, unique: true, sparse: true },
