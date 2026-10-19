@@ -1,41 +1,32 @@
-
-
-const User            = require('../models/User')
-const { getArbitrage, getPositiveEV } = require('./apiService')
-const { sendEmail }   = require('./emailService')
-const mongoose        = require('mongoose')
-
-const Alert = require('../models/Alert')
-
-const HOT_THRESHOLD = 5.0   
-const MIN_THRESHOLD = 1.0   
-const COOLDOWN_MINS = 60    
-
+const User = require('../models/User');
+const { getArbitrage, getPositiveEV } = require('./apiService');
+const { sendEmail } = require('./emailService');
+const mongoose = require('mongoose');
+const Alert = require('../models/Alert');
+const HOT_THRESHOLD = 5.0;
+const MIN_THRESHOLD = 1.0;
+const COOLDOWN_MINS = 60;
 function getMinThreshold(user) {
-  const prefs = user.alertPrefs || {}
-  const plan  = user.plan
-
-  if (plan === 'basic') {
-    
-    return { arb: 2.0, ev: 3.0 }
-  }
-  
-  return {
-    arb: Math.max(MIN_THRESHOLD, prefs.arbThreshold ?? 2.0),
-    ev:  Math.max(MIN_THRESHOLD, prefs.evThreshold  ?? 3.0),
-  }
+    const prefs = user.alertPrefs || {};
+    const plan = user.plan;
+    if (plan === 'basic') {
+        return { arb: 2.0, ev: 3.0 };
+    }
+    return {
+        arb: Math.max(MIN_THRESHOLD, prefs.arbThreshold ?? 2.0),
+        ev: Math.max(MIN_THRESHOLD, prefs.evThreshold ?? 3.0),
+    };
 }
-
 function inCooldown(user) {
-  const last = user.alertPrefs?.lastEmailedAt
-  if (!last) return false
-  const minsAgo = (Date.now() - new Date(last).getTime()) / 60000
-  return minsAgo < COOLDOWN_MINS
+    const last = user.alertPrefs?.lastEmailedAt;
+    if (!last)
+        return false;
+    const minsAgo = (Date.now() - new Date(last).getTime()) / 60000;
+    return minsAgo < COOLDOWN_MINS;
 }
-
 function buildArbEmail(user, arbs, frontendUrl) {
-  const topArbs = arbs.slice(0, 5)
-  const rows = topArbs.map(a => `
+    const topArbs = arbs.slice(0, 5);
+    const rows = topArbs.map(a => `
     <tr>
       <td style="padding:10px 12px;border-bottom:1px solid #f1f5f9">
         <strong>${a.game}</strong><br>
@@ -48,12 +39,10 @@ function buildArbEmail(user, arbs, frontendUrl) {
         ${a.b1} vs ${a.b2}
       </td>
     </tr>
-  `).join('')
-
-  const bestProfit = Math.max(...arbs.map(a => a.profit || 0)).toFixed(2)
-  const isHot      = parseFloat(bestProfit) >= HOT_THRESHOLD
-
-  return `
+  `).join('');
+    const bestProfit = Math.max(...arbs.map(a => a.profit || 0)).toFixed(2);
+    const isHot = parseFloat(bestProfit) >= HOT_THRESHOLD;
+    return `
     <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <style>
       body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#f8fafc; margin:0; padding:0; }
@@ -61,7 +50,7 @@ function buildArbEmail(user, arbs, frontendUrl) {
       .header { background:#080b12; padding:24px 32px; text-align:center; }
       .logo { font-size:20px; font-weight:900; color:#e6edf3; }
       .logo span { color:#00C853; }
-      .badge { display:inline-block; background:${isHot?'#ef4444':'#00C853'}; color:#fff; font-size:11px; font-weight:800; padding:3px 10px; border-radius:20px; margin-top:8px; text-transform:uppercase; letter-spacing:0.5px; }
+      .badge { display:inline-block; background:${isHot ? '#ef4444' : '#00C853'}; color:#fff; font-size:11px; font-weight:800; padding:3px 10px; border-radius:20px; margin-top:8px; text-transform:uppercase; letter-spacing:0.5px; }
       .body { padding:28px 32px; }
       .title { font-size:18px; font-weight:800; color:#1e293b; margin-bottom:8px; }
       .subtitle { font-size:14px; color:#64748b; margin-bottom:20px; line-height:1.6; }
@@ -99,12 +88,11 @@ function buildArbEmail(user, arbs, frontendUrl) {
       </div>
     </div>
     </body></html>
-  `
+  `;
 }
-
 function buildEVEmail(user, evBets, frontendUrl) {
-  const topBets = evBets.slice(0, 5)
-  const rows = topBets.map(b => `
+    const topBets = evBets.slice(0, 5);
+    const rows = topBets.map(b => `
     <tr>
       <td style="padding:10px 12px;border-bottom:1px solid #f1f5f9">
         <strong>${b.game}</strong><br>
@@ -117,9 +105,8 @@ function buildEVEmail(user, evBets, frontendUrl) {
         ${b.bookOdds}
       </td>
     </tr>
-  `).join('')
-
-  return `
+  `).join('');
+    return `
     <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <style>
       body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#f8fafc; margin:0; padding:0; }
@@ -145,7 +132,7 @@ function buildEVEmail(user, evBets, frontendUrl) {
       <div class="body">
         <div class="title">${evBets.length} positive EV ${evBets.length === 1 ? 'bet' : 'bets'} found</div>
         <div class="subtitle">
-          These bets are mathematically profitable long-term. Best edge: <strong style="color:#3b82f6">+${Math.max(...evBets.map(b=>b.ev||0)).toFixed(1)}% EV</strong>.
+          These bets are mathematically profitable long-term. Best edge: <strong style="color:#3b82f6">+${Math.max(...evBets.map(b => b.ev || 0)).toFixed(1)}% EV</strong>.
         </div>
         <table>
           <thead><tr>
@@ -161,126 +148,105 @@ function buildEVEmail(user, evBets, frontendUrl) {
       </div>
     </div>
     </body></html>
-  `
+  `;
 }
-
 async function runAlertScheduler() {
-  const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca'
-  console.log('[AlertScheduler] Starting run at', new Date().toISOString())
-
-  try {
-    
-    const [arbResult, evResult] = await Promise.allSettled([
-      getArbitrage(0, null),
-      getPositiveEV(0, null),
-    ])
-
-    const arbs   = arbResult.status   === 'fulfilled' ? (arbResult.value.data   || []) : []
-    const evBets = evResult.status    === 'fulfilled' ? (evResult.value.data    || []) : []
-
-    if (arbs.length === 0 && evBets.length === 0) {
-      console.log('[AlertScheduler] No opportunities found — skipping')
-      return { sent: 0, skipped: 0 }
+    const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca';
+    console.log('[AlertScheduler] Starting run at', new Date().toISOString());
+    try {
+        const [arbResult, evResult] = await Promise.allSettled([
+            getArbitrage(0, null),
+            getPositiveEV(0, null),
+        ]);
+        const arbs = arbResult.status === 'fulfilled' ? (arbResult.value.data || []) : [];
+        const evBets = evResult.status === 'fulfilled' ? (evResult.value.data || []) : [];
+        if (arbs.length === 0 && evBets.length === 0) {
+            console.log('[AlertScheduler] No opportunities found — skipping');
+            return { sent: 0, skipped: 0 };
+        }
+        console.log(`[AlertScheduler] Found ${arbs.length} arbs, ${evBets.length} EV bets`);
+        const users = await User.find({
+            plan: { $in: ['basic', 'gold', 'platinum'] },
+            subscriptionStatus: { $in: ['active', 'trial'] },
+            'alertPrefs.emailAlerts': { $ne: false },
+        }).select('name email plan alertPrefs');
+        console.log(`[AlertScheduler] ${users.length} eligible subscribers`);
+        let sent = 0, skipped = 0;
+        for (const user of users) {
+            try {
+                if (inCooldown(user)) {
+                    skipped++;
+                    continue;
+                }
+                const threshold = getMinThreshold(user);
+                const prefs = user.alertPrefs || {};
+                const matchingArbs = arbs.filter(a => {
+                    const profit = a.profit || 0;
+                    if (profit < threshold.arb && profit < HOT_THRESHOLD)
+                        return false;
+                    if (prefs.sports?.length > 0 && !prefs.sports.includes(a.sport))
+                        return false;
+                    if (prefs.hotDealsOnly && profit < HOT_THRESHOLD)
+                        return false;
+                    return true;
+                });
+                const matchingEV = ['gold', 'platinum'].includes(user.plan) ? evBets.filter(b => {
+                    const ev = b.ev || 0;
+                    if (ev < threshold.ev && ev < HOT_THRESHOLD)
+                        return false;
+                    if (prefs.sports?.length > 0 && !prefs.sports.includes(b.sport))
+                        return false;
+                    return true;
+                }) : [];
+                if (matchingArbs.length === 0 && matchingEV.length === 0) {
+                    skipped++;
+                    continue;
+                }
+                let subject, html;
+                if (matchingArbs.length > 0) {
+                    const bestProfit = Math.max(...matchingArbs.map(a => a.profit || 0));
+                    const isHot = bestProfit >= HOT_THRESHOLD;
+                    subject = isHot
+                        ? `🔥 Hot arb alert: +${bestProfit.toFixed(2)}% guaranteed profit`
+                        : `⚡ ${matchingArbs.length} new arb ${matchingArbs.length === 1 ? 'opportunity' : 'opportunities'} (best: +${bestProfit.toFixed(2)}%)`;
+                    html = buildArbEmail(user, matchingArbs, frontendUrl);
+                }
+                else {
+                    const bestEV = Math.max(...matchingEV.map(b => b.ev || 0));
+                    subject = `📈 ${matchingEV.length} +EV ${matchingEV.length === 1 ? 'bet' : 'bets'} found (best: +${bestEV.toFixed(1)}% EV)`;
+                    html = buildEVEmail(user, matchingEV, frontendUrl);
+                }
+                await sendEmail({ to: user.email, subject, html, category: 'bulk' });
+                if (Alert) {
+                    const topArb = matchingArbs[0];
+                    await Alert.create({
+                        user: user._id,
+                        type: matchingArbs.length > 0 ? 'arb' : 'ev',
+                        title: subject,
+                        message: matchingArbs.length > 0
+                            ? `${matchingArbs[0]?.game} — +${matchingArbs[0]?.profit?.toFixed(2)}% profit`
+                            : `${matchingEV[0]?.game} — +${matchingEV[0]?.ev?.toFixed(1)}% EV`,
+                        value: matchingArbs.length > 0
+                            ? `+${matchingArbs[0]?.profit?.toFixed(2)}%`
+                            : `+${matchingEV[0]?.ev?.toFixed(1)}%`,
+                        sport: matchingArbs[0]?.sport || matchingEV[0]?.sport,
+                    });
+                }
+                await User.updateOne({ _id: user._id }, { 'alertPrefs.lastEmailedAt': new Date() });
+                sent++;
+                console.log(`[AlertScheduler] Sent to ${user.email} (${user.plan}) — ${matchingArbs.length} arbs, ${matchingEV.length} EV`);
+            }
+            catch (err) {
+                console.error(`[AlertScheduler] Failed for ${user.email}:`, err.message);
+                skipped++;
+            }
+        }
+        console.log(`[AlertScheduler] Done — sent: ${sent}, skipped: ${skipped}`);
+        return { sent, skipped, arbs: arbs.length, evBets: evBets.length };
     }
-
-    console.log(`[AlertScheduler] Found ${arbs.length} arbs, ${evBets.length} EV bets`)
-
-    
-    const users = await User.find({
-      plan:               { $in: ['basic', 'gold', 'platinum'] },
-      subscriptionStatus: { $in: ['active', 'trial'] },
-      'alertPrefs.emailAlerts': { $ne: false },
-    }).select('name email plan alertPrefs')
-
-    console.log(`[AlertScheduler] ${users.length} eligible subscribers`)
-
-    let sent = 0, skipped = 0
-
-    for (const user of users) {
-      try {
-        
-        if (inCooldown(user)) { skipped++; continue }
-
-        const threshold = getMinThreshold(user)
-        const prefs     = user.alertPrefs || {}
-
-        
-        const matchingArbs = arbs.filter(a => {
-          const profit = a.profit || 0
-          if (profit < threshold.arb && profit < HOT_THRESHOLD) return false
-          if (prefs.sports?.length > 0 && !prefs.sports.includes(a.sport)) return false
-          if (prefs.hotDealsOnly && profit < HOT_THRESHOLD) return false
-          return true
-        })
-
-        
-        const matchingEV = ['gold','platinum'].includes(user.plan) ? evBets.filter(b => {
-          const ev = b.ev || 0
-          if (ev < threshold.ev && ev < HOT_THRESHOLD) return false
-          if (prefs.sports?.length > 0 && !prefs.sports.includes(b.sport)) return false
-          return true
-        }) : []
-
-        if (matchingArbs.length === 0 && matchingEV.length === 0) {
-          skipped++; continue
-        }
-
-        
-        let subject, html
-        if (matchingArbs.length > 0) {
-          const bestProfit = Math.max(...matchingArbs.map(a => a.profit || 0))
-          const isHot      = bestProfit >= HOT_THRESHOLD
-          subject = isHot
-            ? `🔥 Hot arb alert: +${bestProfit.toFixed(2)}% guaranteed profit`
-            : `⚡ ${matchingArbs.length} new arb ${matchingArbs.length===1?'opportunity':'opportunities'} (best: +${bestProfit.toFixed(2)}%)`
-          html = buildArbEmail(user, matchingArbs, frontendUrl)
-        } else {
-          const bestEV = Math.max(...matchingEV.map(b => b.ev || 0))
-          subject = `📈 ${matchingEV.length} +EV ${matchingEV.length===1?'bet':'bets'} found (best: +${bestEV.toFixed(1)}% EV)`
-          html = buildEVEmail(user, matchingEV, frontendUrl)
-        }
-
-        await sendEmail({ to: user.email, subject, html })
-
-        
-        if (Alert) {
-          const topArb = matchingArbs[0]
-          await Alert.create({
-            user:    user._id,
-            type:    matchingArbs.length > 0 ? 'arb' : 'ev',
-            title:   subject,
-            message: matchingArbs.length > 0
-              ? `${matchingArbs[0]?.game} — +${matchingArbs[0]?.profit?.toFixed(2)}% profit`
-              : `${matchingEV[0]?.game} — +${matchingEV[0]?.ev?.toFixed(1)}% EV`,
-            value:   matchingArbs.length > 0
-              ? `+${matchingArbs[0]?.profit?.toFixed(2)}%`
-              : `+${matchingEV[0]?.ev?.toFixed(1)}%`,
-            sport:   matchingArbs[0]?.sport || matchingEV[0]?.sport,
-          })
-        }
-
-        
-        await User.updateOne(
-          { _id: user._id },
-          { 'alertPrefs.lastEmailedAt': new Date() }
-        )
-
-        sent++
-        console.log(`[AlertScheduler] Sent to ${user.email} (${user.plan}) — ${matchingArbs.length} arbs, ${matchingEV.length} EV`)
-
-      } catch (err) {
-        console.error(`[AlertScheduler] Failed for ${user.email}:`, err.message)
-        skipped++
-      }
+    catch (err) {
+        console.error('[AlertScheduler] Fatal error:', err.message);
+        return { sent: 0, error: err.message };
     }
-
-    console.log(`[AlertScheduler] Done — sent: ${sent}, skipped: ${skipped}`)
-    return { sent, skipped, arbs: arbs.length, evBets: evBets.length }
-
-  } catch (err) {
-    console.error('[AlertScheduler] Fatal error:', err.message)
-    return { sent: 0, error: err.message }
-  }
 }
-
-module.exports = { runAlertScheduler }
+module.exports = { runAlertScheduler };
