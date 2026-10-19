@@ -1,19 +1,17 @@
-const express   = require('express')
-const router    = express.Router()
-const BlogPost  = require('../models/BlogPost')
-const { protect, adminOnly } = require('../middleware/auth')
-const { sendEmail } = require('../services/emailService')
-const User = require('../models/User')
-
-// Seed default posts if none exist
+const express = require('express');
+const router = express.Router();
+const BlogPost = require('../models/BlogPost');
+const { protect, adminOnly } = require('../middleware/auth');
+const { sendEmail } = require('../services/emailService');
+const User = require('../models/User');
 const DEFAULT_POSTS = [
-  {
-    title: 'What is Arbitrage Betting? A Complete Beginner Guide',
-    slug: 'what-is-arbitrage-betting',
-    category: 'Guide', emoji: '📖', status: 'published', readTime: 6,
-    tags: ['arbitrage', 'beginners', 'strategy'],
-    excerpt: 'Arbitrage betting lets you guarantee profit by placing bets on all outcomes across different sportsbooks — regardless of who wins. Here is how it works.',
-    content: `## What is Arbitrage Betting?
+    {
+        title: 'What is Arbitrage Betting? A Complete Beginner Guide',
+        slug: 'what-is-arbitrage-betting',
+        category: 'Guide', emoji: '📖', status: 'published', readTime: 6,
+        tags: ['arbitrage', 'beginners', 'strategy'],
+        excerpt: 'Arbitrage betting lets you guarantee profit by placing bets on all outcomes across different sportsbooks — regardless of who wins. Here is how it works.',
+        content: `## What is Arbitrage Betting?
 
 Arbitrage betting (also called "arbing" or "sure betting") is a strategy where you place bets on every possible outcome of a sporting event across different sportsbooks. Because different books price odds differently, you can sometimes find situations where the combined implied probability across all books is less than 100% — meaning a guaranteed profit exists regardless of the result.
 
@@ -36,15 +34,15 @@ TrueOdds scans 100+ sportsbooks in real time and calculates the implied probabil
 ## Is Arbitrage Betting Legal?
 
 Yes. You are placing legal bets at licensed sportsbooks. No laws are broken. Sportsbooks may limit or close accounts that win consistently — which is why TrueOdds teaches proper bankroll management and bet sizing.`,
-    author: 'TrueOdds Team'
-  },
-  {
-    title: 'Positive EV Betting: The Most Sustainable Betting Strategy',
-    slug: 'positive-ev-betting-explained',
-    category: 'Strategy', emoji: '♟️', status: 'published', readTime: 8,
-    tags: ['expected value', 'kelly criterion', 'bankroll'],
-    excerpt: 'Expected value betting is the strategy professionals use to win long-term. Learn the math, how to find +EV bets, and how to size your stakes correctly.',
-    content: `## What is +EV Betting?
+        author: 'TrueOdds Team'
+    },
+    {
+        title: 'Positive EV Betting: The Most Sustainable Betting Strategy',
+        slug: 'positive-ev-betting-explained',
+        category: 'Strategy', emoji: '♟️', status: 'published', readTime: 8,
+        tags: ['expected value', 'kelly criterion', 'bankroll'],
+        excerpt: 'Expected value betting is the strategy professionals use to win long-term. Learn the math, how to find +EV bets, and how to size your stakes correctly.',
+        content: `## What is +EV Betting?
 
 Positive Expected Value (+EV) betting means placing bets where the true probability of an outcome is higher than what the sportsbook's odds imply. Over thousands of bets, this guarantees long-term profit even with normal variance.
 
@@ -70,15 +68,15 @@ Once you find a +EV bet, use the Kelly Criterion to size your stake:
 Where B = decimal odds − 1, P = true probability, Q = 1 − P.
 
 Most professionals use half-Kelly (50% of the Kelly stake) to reduce variance while maintaining strong growth.`,
-    author: 'TrueOdds Team'
-  },
-  {
-    title: 'Best Sportsbooks for Arbitrage Betting in Canada (2026)',
-    slug: 'best-sportsbooks-arb-canada-2026',
-    category: 'Analysis', emoji: '🇨🇦', status: 'published', readTime: 9,
-    tags: ['canada', 'sportsbooks', 'review', 'ontario'],
-    excerpt: 'The Canadian sports betting market is one of the best in the world for arb bettors. Here are the top books by limit, speed of restriction, and market coverage.',
-    content: `## The Canadian Arb Landscape
+        author: 'TrueOdds Team'
+    },
+    {
+        title: 'Best Sportsbooks for Arbitrage Betting in Canada (2026)',
+        slug: 'best-sportsbooks-arb-canada-2026',
+        category: 'Analysis', emoji: '🇨🇦', status: 'published', readTime: 9,
+        tags: ['canada', 'sportsbooks', 'review', 'ontario'],
+        excerpt: 'The Canadian sports betting market is one of the best in the world for arb bettors. Here are the top books by limit, speed of restriction, and market coverage.',
+        content: `## The Canadian Arb Landscape
 
 Since Ontario opened its regulated market in April 2022, Canadian bettors have access to some of the world's best sportsbooks. Many are slow to restrict, offer generous welcome bonuses, and price markets independently — creating frequent arb windows.
 
@@ -102,15 +100,15 @@ Excellent for same-game parlays and live betting arbs. Deep player props market 
 ## Pro Tip
 
 Rotate your bets across all books. Never bet the same side at the same book repeatedly — it flags your account faster.`,
-    author: 'TrueOdds Team'
-  },
-  {
-    title: 'Kelly Criterion: The Professional Approach to Bet Sizing',
-    slug: 'kelly-criterion-bet-sizing',
-    category: 'Strategy', emoji: '📐', status: 'published', readTime: 7,
-    tags: ['kelly criterion', 'bankroll management', 'math'],
-    excerpt: 'Bet too small and you leave profit on the table. Bet too large and one bad run wipes you out. The Kelly Criterion solves this precisely.',
-    content: `## Why Bet Sizing Matters
+        author: 'TrueOdds Team'
+    },
+    {
+        title: 'Kelly Criterion: The Professional Approach to Bet Sizing',
+        slug: 'kelly-criterion-bet-sizing',
+        category: 'Strategy', emoji: '📐', status: 'published', readTime: 7,
+        tags: ['kelly criterion', 'bankroll management', 'math'],
+        excerpt: 'Bet too small and you leave profit on the table. Bet too large and one bad run wipes you out. The Kelly Criterion solves this precisely.',
+        content: `## Why Bet Sizing Matters
 
 Most bettors focus entirely on finding winners and ignore how much to bet. This is a critical mistake. Even with a genuine edge, incorrect bet sizing can lead to ruin — or dramatically reduce your long-term growth.
 
@@ -137,15 +135,15 @@ Full Kelly is mathematically optimal but produces high variance — your bankrol
 ## TrueOdds Stake Calculator
 
 TrueOdds automatically calculates your optimal Kelly stake for every +EV bet based on your bankroll size. Set your bankroll in Settings and every bet card shows your recommended stake.`,
-    author: 'TrueOdds Team'
-  },
-  {
-    title: 'How to Avoid Sportsbook Restrictions as an Arb Bettor',
-    slug: 'avoid-sportsbook-restrictions',
-    category: 'Tips', emoji: '🛡️', status: 'published', readTime: 9,
-    tags: ['restrictions', 'limits', 'strategy', 'longevity'],
-    excerpt: 'Sportsbooks limit and ban winning accounts. Here are the proven strategies professionals use to protect their accounts and extend their betting lifespan.',
-    content: `## Why Sportsbooks Restrict Winners
+        author: 'TrueOdds Team'
+    },
+    {
+        title: 'How to Avoid Sportsbook Restrictions as an Arb Bettor',
+        slug: 'avoid-sportsbook-restrictions',
+        category: 'Tips', emoji: '🛡️', status: 'published', readTime: 9,
+        tags: ['restrictions', 'limits', 'strategy', 'longevity'],
+        excerpt: 'Sportsbooks limit and ban winning accounts. Here are the proven strategies professionals use to protect their accounts and extend their betting lifespan.',
+        content: `## Why Sportsbooks Restrict Winners
 
 Sportsbooks are businesses. They profit from losing bettors and lose money to winners. When an account shows a consistent edge — through arbitrage, +EV betting, or sharp line shopping — the book's risk management team will reduce limits or close the account.
 
@@ -175,15 +173,15 @@ When a book reduces your limits, do not complain. Accept it, continue betting sm
 ## Which Books Never Restrict?
 
 **Pinnacle** has a no-restriction policy and welcomes sharp bettors. Use Pinnacle for large stakes. Use soft books for smaller stakes spread across many accounts.`,
-    author: 'TrueOdds Team'
-  },
-  {
-    title: 'CFL Arbitrage Guide: Finding Edges in Canadian Football',
-    slug: 'cfl-arbitrage-guide-2026',
-    category: 'Analysis', emoji: '🏈', status: 'published', readTime: 8,
-    tags: ['CFL', 'canadian football', 'arbitrage', 'canada'],
-    excerpt: 'The CFL is one of the most underserved leagues for sharp bettors. Fewer books cover it, pricing is inconsistent, and arb windows last longer. Here is how to exploit it.',
-    content: `## Why the CFL is Great for Arb Bettors
+        author: 'TrueOdds Team'
+    },
+    {
+        title: 'CFL Arbitrage Guide: Finding Edges in Canadian Football',
+        slug: 'cfl-arbitrage-guide-2026',
+        category: 'Analysis', emoji: '🏈', status: 'published', readTime: 8,
+        tags: ['CFL', 'canadian football', 'arbitrage', 'canada'],
+        excerpt: 'The CFL is one of the most underserved leagues for sharp bettors. Fewer books cover it, pricing is inconsistent, and arb windows last longer. Here is how to exploit it.',
+        content: `## Why the CFL is Great for Arb Bettors
 
 The Canadian Football League runs June through November and is covered by far fewer sportsbooks than NFL or NBA. This creates several advantages for arb bettors:
 
@@ -212,118 +210,122 @@ The Canadian Football League runs June through November and is covered by far fe
 ## Season Schedule
 
 The 2026 CFL season runs June 4 through the Grey Cup in November. TrueOdds will show all CFL arbs automatically as soon as books post lines.`,
-    author: 'TrueOdds Team'
-  },
-]
-
+        author: 'TrueOdds Team'
+    },
+];
 async function seedDefaults() {
-  try {
-    for (const post of DEFAULT_POSTS) {
-      const exists = await BlogPost.findOne({ slug: post.slug })
-      if (!exists) {
-        await BlogPost.create(post)
-        console.log(`[Blog] Seeded: ${post.title}`)
-      }
+    try {
+        for (const post of DEFAULT_POSTS) {
+            const exists = await BlogPost.findOne({ slug: post.slug });
+            if (!exists) {
+                await BlogPost.create(post);
+                console.log(`[Blog] Seeded: ${post.title}`);
+            }
+        }
     }
-  } catch (err) { console.warn('[Blog] Seed error:', err.message) }
+    catch (err) {
+        console.warn('[Blog] Seed error:', err.message);
+    }
 }
-seedDefaults()
-
-// PUBLIC — get all published posts
+seedDefaults();
 router.get('/', async (req, res) => {
-  try {
-    const posts = await BlogPost.find({ status: 'published' })
-      .sort({ createdAt: -1 })
-      .select('-content')
-    res.json({ success: true, data: posts })
-  } catch (err) { res.status(500).json({ success: false, message: err.message }) }
-})
-
-// PUBLIC — get hot topics for homepage (max 4)
+    try {
+        const posts = await BlogPost.find({ status: 'published' })
+            .sort({ createdAt: -1 })
+            .select('-content');
+        res.json({ success: true, data: posts });
+    }
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.get('/hot', async (req, res) => {
-  try {
-    const posts = await BlogPost.find({ status: 'published', hot: true })
-      .sort({ hotAt: -1 })
-      .limit(4)
-      .select('-content')
-    res.json({ success: true, data: posts })
-  } catch (err) { res.status(500).json({ success: false, message: err.message }) }
-})
-
-// ADMIN — get all posts (including drafts) — MUST be before /:slug
+    try {
+        const posts = await BlogPost.find({ status: 'published', hot: true })
+            .sort({ hotAt: -1 })
+            .limit(4)
+            .select('-content');
+        res.json({ success: true, data: posts });
+    }
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.get('/admin/all', protect, adminOnly, async (req, res) => {
-  try {
-    const posts = await BlogPost.find().sort({ createdAt: -1 })
-    res.json({ success: true, data: posts })
-  } catch (err) { res.status(500).json({ success: false, message: err.message }) }
-})
-
-// PUBLIC — get single post by slug
+    try {
+        const posts = await BlogPost.find().sort({ createdAt: -1 });
+        res.json({ success: true, data: posts });
+    }
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.get('/:slug', async (req, res) => {
-  try {
-    const post = await BlogPost.findOne({ slug: req.params.slug, status: 'published' })
-    if (!post) return res.status(404).json({ success: false, message: 'Post not found' })
-    res.json({ success: true, data: post })
-  } catch (err) { res.status(500).json({ success: false, message: err.message }) }
-})
-
-// ADMIN — create post
+    try {
+        const post = await BlogPost.findOne({ slug: req.params.slug, status: 'published' });
+        if (!post)
+            return res.status(404).json({ success: false, message: 'Post not found' });
+        res.json({ success: true, data: post });
+    }
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.post('/', protect, adminOnly, async (req, res) => {
-  try {
-    const { title, slug, excerpt, content, category, emoji, tags, status, readTime, author, hot } = req.body
-    const hotAt = hot ? new Date() : null
-    const post = await BlogPost.create({ title, slug: slug || title.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''), excerpt, content, category, emoji, tags, status, readTime, author, hot: !!hot, hotAt })
-    if (post.status === 'published') {
-      sendNewsletterForPost(post).catch(err => console.error('[Newsletter] Failed:', err.message))
+    try {
+        const { title, slug, excerpt, content, category, emoji, tags, status, readTime, author, hot } = req.body;
+        const hotAt = hot ? new Date() : null;
+        const post = await BlogPost.create({ title, slug: slug || title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''), excerpt, content, category, emoji, tags, status, readTime, author, hot: !!hot, hotAt });
+        if (post.status === 'published') {
+            sendNewsletterForPost(post).catch(err => console.error('[Newsletter] Failed:', err.message));
+        }
+        res.json({ success: true, data: post });
     }
-    res.json({ success: true, data: post })
-  } catch (err) { res.status(500).json({ success: false, message: err.message }) }
-})
-
-// ADMIN — update post
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.put('/:id', protect, adminOnly, async (req, res) => {
-  try {
-    const existing = await BlogPost.findById(req.params.id)
-    if (!existing) return res.status(404).json({ success: false, message: 'Not found' })
-
-    const wasPublished = existing.status === 'published'
-    const wasHot = existing.hot
-
-    // Set hotAt timestamp when first marked hot
-    if (req.body.hot && !wasHot) req.body.hotAt = new Date()
-    if (!req.body.hot) req.body.hotAt = null
-
-    const post = await BlogPost.findByIdAndUpdate(req.params.id, req.body, { new: true })
-
-    // Send newsletter when: newly published OR newly marked hot
-    const justPublished = !wasPublished && post.status === 'published'
-    const justHot = !wasHot && post.hot
-    if ((justPublished || justHot) && post.status === 'published') {
-      sendNewsletterForPost(post).catch(err => console.error('[Newsletter] Failed:', err.message))
+    try {
+        const existing = await BlogPost.findById(req.params.id);
+        if (!existing)
+            return res.status(404).json({ success: false, message: 'Not found' });
+        const wasPublished = existing.status === 'published';
+        const wasHot = existing.hot;
+        if (req.body.hot && !wasHot)
+            req.body.hotAt = new Date();
+        if (!req.body.hot)
+            req.body.hotAt = null;
+        const post = await BlogPost.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        const justPublished = !wasPublished && post.status === 'published';
+        const justHot = !wasHot && post.hot;
+        if ((justPublished || justHot) && post.status === 'published') {
+            sendNewsletterForPost(post).catch(err => console.error('[Newsletter] Failed:', err.message));
+        }
+        res.json({ success: true, data: post });
     }
-
-    res.json({ success: true, data: post })
-  } catch (err) { res.status(500).json({ success: false, message: err.message }) }
-})
-
-// ADMIN — delete post
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 router.delete('/:id', protect, adminOnly, async (req, res) => {
-  try {
-    await BlogPost.findByIdAndDelete(req.params.id)
-    res.json({ success: true })
-  } catch (err) { res.status(500).json({ success: false, message: err.message }) }
-})
-
+    try {
+        await BlogPost.findByIdAndDelete(req.params.id);
+        res.json({ success: true });
+    }
+    catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 async function sendNewsletterForPost(post) {
-  try {
-    const users = await User.find({ email: { $exists: true, $ne: '' } }).select('name email plan')
-    if (!users.length) return
-
-    const hotBadge = post.hot ? '🔥 HOT TOPIC · ' : ''
-    const subject  = `${hotBadge}New on TrueOdds: ${post.title}`
-    const fe       = process.env.FRONTEND_URL || 'https://trueodds.ca'
-
-    const html = `<!DOCTYPE html>
+    try {
+        const users = await User.find({ email: { $exists: true, $ne: '' } }).select('name email plan');
+        if (!users.length)
+            return;
+        const hotBadge = post.hot ? '🔥 HOT TOPIC · ' : '';
+        const subject = `${hotBadge}New on TrueOdds: ${post.title}`;
+        const fe = process.env.FRONTEND_URL || 'https://trueodds.ca';
+        const html = `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;padding:0;background:#080b12;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
@@ -344,27 +346,25 @@ async function sendNewsletterForPost(post) {
         <tr><td style="background:#0a0d15;border-radius:0 0 16px 16px;padding:20px 32px;border:1px solid rgba(255,255,255,0.06);border-top:none;">
           <p style="margin:0;font-size:12px;color:#4b5563;line-height:1.6;">
             You received this because you have a TrueOdds account.<br/>
-            © 2026 TrueOdds · <a href="${fe}" style="color:#6b7280;">${fe.replace('https://','')}</a>
+            © 2026 TrueOdds · <a href="${fe}" style="color:#6b7280;">${fe.replace('https://', '')}</a>
           </p>
         </td></tr>
       </table>
     </td></tr>
   </table>
 </body>
-</html>`
-
-    const BATCH = 10
-    for (let i = 0; i < users.length; i += BATCH) {
-      const batch = users.slice(i, i + BATCH)
-      await Promise.allSettled(batch.map(u =>
-        sendEmail({ to: u.email, subject, html, text: `${post.title}\n\n${post.excerpt}\n\nRead: ${fe}/blog/${post.slug}` })
-      ))
-      if (i + BATCH < users.length) await new Promise(r => setTimeout(r, 300))
+</html>`;
+        const BATCH = 10;
+        for (let i = 0; i < users.length; i += BATCH) {
+            const batch = users.slice(i, i + BATCH);
+            await Promise.allSettled(batch.map(u => sendEmail({ to: u.email, subject, html, category: 'bulk', text: `${post.title}\n\n${post.excerpt}\n\nRead: ${fe}/blog/${post.slug}` })));
+            if (i + BATCH < users.length)
+                await new Promise(r => setTimeout(r, 300));
+        }
+        console.log(`[Newsletter] Sent "${post.title}" to ${users.length} users`);
     }
-    console.log(`[Newsletter] Sent "${post.title}" to ${users.length} users`)
-  } catch (err) {
-    console.error('[Newsletter] Error:', err.message)
-  }
+    catch (err) {
+        console.error('[Newsletter] Error:', err.message);
+    }
 }
-
-module.exports = router
+module.exports = router;
