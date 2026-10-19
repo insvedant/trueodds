@@ -2,11 +2,12 @@
   "name": "trueodds-backend",
   "version": "1.0.0",
   "main": "src/index.js",
-  "scripts": {
+   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
     "seed": "node src/seed.js",
-    "test": "node --test tests/stripe.test.js tests/routes.test.js tests/sync.test.js"
+    "test": "node --test tests/stripe.test.js tests/routes.test.js tests/sync.test.js tests/cancel.test.js tests/model.test.js tests/brevo.test.js tests/email.test.js tests/otp.test.js tests/auth_otp.test.js",
+    "otp:smoke": "node scripts/otp-smoke.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
