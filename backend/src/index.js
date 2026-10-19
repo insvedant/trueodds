@@ -48,6 +48,11 @@ app.use(cors({ origin: getAllowedOrigins(), credentials: true }));
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500, message: { success: false, message: 'Too many requests.' } }));
+// One-time-code endpoints: tight per-IP limits on top of the per-email limits enforced in otpService.
+const otpMsg = (message) => ({ success: false, message });
+app.post('/api/auth/register/request-otp', rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: otpMsg('Too many code requests. Please wait 15 minutes.') }));
+app.post('/api/auth/forgot-password', rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: otpMsg('Too many reset requests. Please wait 15 minutes.') }));
+app.post(['/api/auth/register/verify-otp', '/api/auth/forgot-password/verify-otp'], rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: otpMsg('Too many attempts. Please wait 15 minutes.') }));
 app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: { success: false, message: 'Too many login attempts. Please wait 15 minutes.' } }));
 app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
 function priceStatus(envVal) {
@@ -63,7 +68,7 @@ app.get('/health', (req, res) => res.json({
     db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     stripe: process.env.STRIPE_SECRET_KEY?.startsWith('sk_') ? 'configured' : 'missing',
     stripeWebhook: process.env.STRIPE_WEBHOOK_SECRET?.startsWith('whsec_') ? 'configured' : 'missing',
-    zoho: (process.env.ZOHO_USER && process.env.ZOHO_PASSWORD) ? 'configured' : 'missing',
+    brevo: process.env.BREVO_API_KEY ? 'configured' : 'missing',
     telegram: (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) ? 'configured' : 'missing',
     stripeBasicMonthly: priceStatus(process.env.STRIPE_PRICE_BASIC_MONTHLY),
     stripeBasicYearly: priceStatus(process.env.STRIPE_PRICE_BASIC_YEARLY),
