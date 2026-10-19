@@ -1,44 +1,86 @@
-const nodemailer = require('nodemailer');
-const FROM_NAME = 'TrueOdds';
-const FROM_ADDRESS = process.env.ZOHO_USER || 'support@trueodds.ca';
-function createTransporter() {
-    const user = process.env.ZOHO_USER;
-    const pass = process.env.ZOHO_PASSWORD;
-    if (!user || !pass) {
-        console.warn('[Email] Zoho not configured — emails will be logged to console only');
-        return null;
-    }
-    return nodemailer.createTransport({
-        host: 'smtp.zoho.com',
-        port: 465,
-        secure: true,
-        auth: { user, pass },
-    });
+/**
+ * Outgoing email, via Brevo's transactional API (see brevoClient.js).
+ *
+ * Every email is either
+ *   'transactional'  a code, a welcome, a receipt: always sent
+ *   'bulk'           newsletter / blog notices / alerts: capped per day (BULK_EMAIL_DAILY_CAP) so a big send can
+ *                    never use up the plan's daily allowance and stop signup or password-reset codes arriving.
+ *
+ * Environment:
+ *   BREVO_API_KEY         required in production
+ *   EMAIL_FROM_ADDRESS    must be a verified sender/domain in Brevo (default no-reply@trueodds.ca)
+ *   EMAIL_FROM_NAME       default TrueOdds
+ *   EMAIL_REPLY_TO        default support@trueodds.ca
+ *   BULK_EMAIL_DAILY_CAP  default 150
+ *   EMAIL_DEV_MODE=true   with no key, print emails to the console instead of failing (local development only)
+ */
+const { sendViaBrevo, EmailSendError } = require('./brevoClient');
+
+const settings = () => ({
+    apiKey: process.env.BREVO_API_KEY,
+    fromName: process.env.EMAIL_FROM_NAME || 'TrueOdds',
+    fromAddress: process.env.EMAIL_FROM_ADDRESS || 'no-reply@trueodds.ca',
+    replyTo: process.env.EMAIL_REPLY_TO || 'support@trueodds.ca',
+});
+
+const devModeAllowed = () => process.env.EMAIL_DEV_MODE === 'true' || ['development', 'test'].includes(process.env.NODE_ENV);
+
+/** HTML-escape text that came from a user (names, emails) before it goes into an HTML template. */
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const bulkBudget = { day: null, count: 0 };
+function takeBulkSlot(now = new Date()) {
+    const day = now.toISOString().slice(0, 10);
+    if (bulkBudget.day !== day) { bulkBudget.day = day; bulkBudget.count = 0; }
+    const cap = Number(process.env.BULK_EMAIL_DAILY_CAP ?? 150);
+    if (bulkBudget.count >= cap) return false;
+    bulkBudget.count += 1;
+    return true;
 }
-async function sendEmail({ to, subject, html, text }) {
-    const transporter = createTransporter();
-    if (!transporter) {
+const resetBulkBudget = () => { bulkBudget.day = null; bulkBudget.count = 0; };
+
+async function sendEmail({ to, subject, html, text, category = 'transactional', tags }) {
+    const cfg = settings();
+    if (!cfg.apiKey) {
+        if (!devModeAllowed()) {
+            throw new EmailSendError('Email is not configured: BREVO_API_KEY is missing.', { code: 'not_configured' });
+        }
         console.log('\n────────────────────────────────────');
         console.log('[Email DEV MODE — not sent]');
-        console.log(`TO:      ${to}`);
+        console.log(`TO:      ${typeof to === 'string' ? to : JSON.stringify(to)}`);
         console.log(`SUBJECT: ${subject}`);
         console.log(`BODY:    ${text || html?.slice(0, 200)}`);
         console.log('────────────────────────────────────\n');
         return { success: true, devMode: true };
     }
-    const info = await transporter.sendMail({
-        from: `"${FROM_NAME}" <${FROM_ADDRESS}>`,
-        to,
-        subject,
-        html,
-        text,
+    if (category === 'bulk' && !takeBulkSlot()) {
+        throw new EmailSendError(`Daily bulk email cap (${process.env.BULK_EMAIL_DAILY_CAP ?? 150}) reached; this email was not sent.`, { code: 'bulk_cap' });
+    }
+    const { messageId } = await sendViaBrevo({
+        apiKey: cfg.apiKey,
+        sender: { name: cfg.fromName, email: cfg.fromAddress },
+        replyTo: { email: cfg.replyTo, name: `${cfg.fromName} Support` },
+        to, subject, html, text,
+        tags: tags || [category],
     });
-    console.log(`[Email] Sent to ${to} — MessageId: ${info.messageId}`);
-    return { success: true, messageId: info.messageId };
+    console.log(`[Email] Sent (${category}) to ${typeof to === 'string' ? to : JSON.stringify(to)} — id ${messageId}`);
+    return { success: true, messageId };
 }
-async function sendPasswordResetEmail(email, name, resetToken) {
+
+/**
+ * The one-time-code email used for signup verification and password reset.
+ * Deliberately contains no clickable link: people should type the code into the page they are on.
+ */
+async function sendOtpEmail({ email, name, code, purpose, minutes = 10 }) {
     const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca';
-    const resetUrl = `${frontendUrl}/reset-password?token=${resetToken}`;
+    const isReset = purpose === 'reset';
+    const title = isReset ? 'Reset your password' : 'Verify your email';
+    const intro = isReset
+        ? 'We received a request to reset the password for your TrueOdds account. Enter this code on the reset page:'
+        : 'Welcome to TrueOdds! Enter this code on the signup page to verify your email address:';
+    const ignore = isReset
+        ? "If you didn't ask to reset your password, you can ignore this email. Your password will not change."
+        : "If you didn't try to create a TrueOdds account, you can ignore this email.";
     const html = `
     <!DOCTYPE html>
     <html>
@@ -53,58 +95,54 @@ async function sendPasswordResetEmail(email, name, resetToken) {
         .logo span  { color:#00C853; }
         .body       { padding:32px; color:#1e293b; }
         .title      { font-size:20px; font-weight:800; margin-bottom:12px; }
-        .text       { font-size:14px; line-height:1.75; color:#64748b; margin-bottom:24px; }
-        .btn        { display:inline-block; background:#00C853; color:#000000; font-weight:800; font-size:15px; padding:13px 32px; border-radius:9px; text-decoration:none; }
-        .warning    { background:#fff7ed; border:1px solid #fed7aa; border-radius:8px; padding:12px 16px; font-size:12px; color:#92400e; margin-top:24px; }
+        .text       { font-size:14px; line-height:1.75; color:#64748b; margin-bottom:20px; }
+        .code       { font-family:'SF Mono',Menlo,Consolas,monospace; font-size:34px; font-weight:800; letter-spacing:10px; text-align:center; background:#f1f5f9; border:1px dashed #cbd5e1; border-radius:10px; padding:16px 12px; margin:8px 0 22px; color:#0f172a; }
+        .warning    { background:#fff7ed; border:1px solid #fed7aa; border-radius:8px; padding:12px 16px; font-size:12px; color:#92400e; margin-top:20px; line-height:1.6; }
         .footer     { padding:20px 32px; background:#f8fafc; font-size:12px; color:#94a3b8; text-align:center; line-height:1.75; }
         .footer a   { color:#94a3b8; }
       </style>
     </head>
     <body>
       <div class="container">
-        <div class="header">
-          <div class="logo">True<span>Odds</span></div>
-        </div>
+        <div class="header"><div class="logo">True<span>Odds</span></div></div>
         <div class="body">
-          <div class="title">Reset your password</div>
-          <p class="text">Hi ${name},<br><br>
-            We received a request to reset the password for your TrueOdds account.<br>
-            Click the button below to set a new password. This link expires in <strong>10 minutes</strong>.
-          </p>
-          <a href="${resetUrl}" class="btn">Reset Password →</a>
-          <div class="warning">
-            ⚠ If you didn't request a password reset, you can safely ignore this email.
-            Your password will not change.
-          </div>
+          <div class="title">${title}</div>
+          <p class="text">Hi ${esc(name || 'there')},<br><br>${intro}</p>
+          <div class="code">${esc(code)}</div>
+          <p class="text">This code expires in <strong>${minutes} minutes</strong> and can only be used once.</p>
+          <div class="warning">🔒 Never share this code with anyone. TrueOdds will never ask you for it by phone, chat or email.<br>${ignore}</div>
         </div>
         <div class="footer">
           TrueOdds, Inc. · Real-time sports betting analytics<br>
-          <a href="${frontendUrl}">trueodds.ca</a> ·
-          <a href="mailto:support@trueodds.ca">support@trueodds.ca</a><br><br>
-          This email was sent to ${email} because a password reset was requested.
+          <a href="${frontendUrl}">trueodds.ca</a> · <a href="mailto:support@trueodds.ca">support@trueodds.ca</a><br><br>
+          This email was sent to ${esc(email)}.
         </div>
       </div>
     </body>
     </html>
   `;
-    const text = `
-TrueOdds — Password Reset
+    const text = `TrueOdds — ${title}
 
-Hi ${name},
+Hi ${name || 'there'},
 
-Click the link below to reset your password (expires in 10 minutes):
-${resetUrl}
+${intro}
 
-If you didn't request a password reset, ignore this email.
+    ${code}
+
+This code expires in ${minutes} minutes and can only be used once.
+Never share it with anyone. TrueOdds will never ask you for it.
+${ignore}
 
 — TrueOdds Team
-support@trueodds.ca
-  `.trim();
-    return sendEmail({ to: email, subject: 'Reset your TrueOdds password', html, text });
+support@trueodds.ca`;
+    return sendEmail({
+        to: email,
+        subject: isReset ? 'Your TrueOdds password reset code' : 'Your TrueOdds verification code',
+        html, text, category: 'transactional', tags: ['otp', isReset ? 'password-reset' : 'signup'],
+    });
 }
 async function sendWelcomeEmail(email, name, plan) {
     const frontendUrl = process.env.FRONTEND_URL || 'https://trueodds.ca';
-    const planLabel = plan.charAt(0).toUpperCase() + plan.slice(1);
     const html = `
     <!DOCTYPE html>
     <html>
@@ -131,9 +169,9 @@ async function sendWelcomeEmail(email, name, plan) {
       <div class="container">
         <div class="header"><div class="logo">True<span>Odds</span></div></div>
         <div class="body">
-          <div class="title">Welcome to TrueOdds, ${name}! 🎉</div>
+          <div class="title">Welcome to TrueOdds, ${esc(name)}! 🎉</div>
           <p class="text">
-            Your <strong>${planLabel} plan</strong> 7-day free trial is now active.<br>
+            Your account is ready and your free trial is active. You can see its exact end date any time under Settings → My Plan.<br>
             Here's what's waiting for you in your dashboard:
           </p>
           <div class="features">
@@ -156,9 +194,9 @@ async function sendWelcomeEmail(email, name, plan) {
   `;
     return sendEmail({
         to: email,
-        subject: `Welcome to TrueOdds — your ${planLabel} trial is active 🎉`,
+        subject: `Welcome to TrueOdds — your free trial is active 🎉`,
         html,
-        text: `Welcome to TrueOdds, ${name}! Your ${planLabel} trial is active. Visit ${frontendUrl}/dashboard to get started.`,
+        text: `Welcome to TrueOdds, ${name}! Your account is ready and your free trial is active. Visit ${frontendUrl}/dashboard to get started.`,
     });
 }
 async function sendSubscriptionConfirmationEmail(email, name, plan, billingPeriod, price) {
@@ -192,7 +230,7 @@ async function sendSubscriptionConfirmationEmail(email, name, plan, billingPerio
       <div class="container">
         <div class="header"><div class="logo">True<span>Odds</span></div></div>
         <div class="body">
-          <div class="title">You're subscribed, ${name}! 🎉</div>
+          <div class="title">You're subscribed, ${esc(name)}! 🎉</div>
           <p class="text">
             Your <strong>${planLabel}</strong> subscription is confirmed.
             Your 7-day free trial has started — you won't be charged until it ends.
@@ -224,12 +262,12 @@ async function sendOwnerNewSubscriberAlert({ name, email, plan, billingPeriod, p
     const recipients = [
         process.env.OWNER_EMAIL,
         process.env.SEC_EMAIL,
-        process.env.ZOHO_USER,
+        process.env.ZOHO_USER,          // legacy name: still honoured as one more owner address (e.g. the support mailbox)
     ]
         .filter(Boolean)
-        .filter((addr, index, self) => self.indexOf(addr) === index)
-        .join(', ');
-    if (!recipients) {
+        .map((addr) => addr.trim())
+        .filter((addr, index, self) => self.indexOf(addr) === index);
+    if (!recipients.length) {
         console.warn('[Email] No owner email configured — skipping new-subscriber owner alert');
         return { success: false, skipped: true };
     }
@@ -242,8 +280,8 @@ async function sendOwnerNewSubscriberAlert({ name, email, plan, billingPeriod, p
         A new paid subscription has been successfully created.
       </p>
       <table style="width:100%;font-size:14px;border-collapse:collapse;">
-        <tr><td style="padding:6px 0;color:#64748b;">Name</td><td style="padding:6px 0;font-weight:700;">${name}</td></tr>
-        <tr><td style="padding:6px 0;color:#64748b;">Email</td><td style="padding:6px 0;font-weight:700;">${email}</td></tr>
+        <tr><td style="padding:6px 0;color:#64748b;">Name</td><td style="padding:6px 0;font-weight:700;">${esc(name)}</td></tr>
+        <tr><td style="padding:6px 0;color:#64748b;">Email</td><td style="padding:6px 0;font-weight:700;">${esc(email)}</td></tr>
         <tr><td style="padding:6px 0;color:#64748b;">Plan</td><td style="padding:6px 0;font-weight:700;">${planLabel}</td></tr>
         <tr><td style="padding:6px 0;color:#64748b;">Billing</td><td style="padding:6px 0;font-weight:700;">$${price} / ${periodLabel}</td></tr>
       </table>
@@ -275,12 +313,12 @@ async function sendSubscriptionLifecycleEmail(eventType, { name, email, plan, am
     const recipients = [
         process.env.OWNER_EMAIL,
         process.env.SEC_EMAIL,
-        process.env.ZOHO_USER,
+        process.env.ZOHO_USER,          // legacy name: still honoured as one more owner address (e.g. the support mailbox)
     ]
         .filter(Boolean)
-        .filter((addr, index, self) => self.indexOf(addr) === index)
-        .join(', ');
-    if (!recipients) {
+        .map((addr) => addr.trim())
+        .filter((addr, index, self) => self.indexOf(addr) === index);
+    if (!recipients.length) {
         console.warn(`[Email] No owner email configured — skipping ${eventType} alert`);
         return { success: false, skipped: true };
     }
@@ -294,8 +332,8 @@ async function sendSubscriptionLifecycleEmail(eventType, { name, email, plan, am
       <h2 style="margin-bottom:4px;">${copy.emoji} ${copy.title}</h2>
       <p style="color:#64748b;font-size:13px;margin-top:0;">${copy.blurb}</p>
       <table style="width:100%;font-size:14px;border-collapse:collapse;">
-        <tr><td style="padding:6px 0;color:#64748b;">Name</td><td style="padding:6px 0;font-weight:700;">${name}</td></tr>
-        <tr><td style="padding:6px 0;color:#64748b;">Email</td><td style="padding:6px 0;font-weight:700;">${email}</td></tr>
+        <tr><td style="padding:6px 0;color:#64748b;">Name</td><td style="padding:6px 0;font-weight:700;">${esc(name)}</td></tr>
+        <tr><td style="padding:6px 0;color:#64748b;">Email</td><td style="padding:6px 0;font-weight:700;">${esc(email)}</td></tr>
         <tr><td style="padding:6px 0;color:#64748b;">Plan</td><td style="padding:6px 0;font-weight:700;">${planLabel}</td></tr>
         ${amount !== null ? `<tr><td style="padding:6px 0;color:#64748b;">Amount</td><td style="padding:6px 0;font-weight:700;">$${amount}</td></tr>` : ''}
         <tr><td style="padding:6px 0;color:#64748b;">Date</td><td style="padding:6px 0;font-weight:700;">${dateStr}</td></tr>
@@ -313,4 +351,4 @@ async function sendSubscriptionLifecycleEmail(eventType, { name, email, plan, am
     });
 }
 
-module.exports = { sendEmail, sendPasswordResetEmail, sendWelcomeEmail, sendSubscriptionConfirmationEmail, sendOwnerNewSubscriberAlert, sendSubscriptionLifecycleEmail };
+module.exports = { sendEmail, sendOtpEmail, sendWelcomeEmail, sendSubscriptionConfirmationEmail, sendOwnerNewSubscriberAlert, sendSubscriptionLifecycleEmail, EmailSendError, esc, resetBulkBudget };
